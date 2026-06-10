@@ -44,6 +44,6 @@ pub mod transform;
 
 pub use error::SapientError;
 pub use proto::{
-    Content, Alert, AlertAck, DetectionReport, SapientProtoError,
-    Registration, RegistrationAck, SapientMessage, StatusReport, Task, TaskAck,
+    Alert, AlertAck, Content, DetectionReport, Registration, RegistrationAck, SapientMessage,
+    SapientProtoError, StatusReport, Task, TaskAck,
 };

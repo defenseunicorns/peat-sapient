@@ -70,7 +70,10 @@ mod tests {
 
     fn test_message() -> SapientMessage {
         SapientMessage {
-            timestamp: Some(Timestamp { seconds: 1_700_000_000, nanos: 0 }),
+            timestamp: Some(Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
             node_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
             destination_id: None,
             content: None,
@@ -100,7 +103,10 @@ mod tests {
         let mut buf = BytesMut::new();
         codec.encode(msg.clone(), &mut buf).unwrap();
 
-        let decoded = codec.decode(&mut buf).unwrap().expect("should have a message");
+        let decoded = codec
+            .decode(&mut buf)
+            .unwrap()
+            .expect("should have a message");
         assert_eq!(msg, decoded);
         assert!(buf.is_empty(), "buffer should be fully consumed");
     }

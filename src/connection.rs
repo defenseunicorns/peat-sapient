@@ -82,10 +82,7 @@ pub async fn accept(listener: &TcpListener) -> Result<(SapientFramed, SocketAddr
 }
 
 /// Send a single `SapientMessage` over a framed connection.
-pub async fn send(
-    framed: &mut SapientFramed,
-    msg: SapientMessage,
-) -> Result<(), SapientError> {
+pub async fn send(framed: &mut SapientFramed, msg: SapientMessage) -> Result<(), SapientError> {
     framed.send(msg).await
 }
 
