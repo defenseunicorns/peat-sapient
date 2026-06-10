@@ -7,9 +7,7 @@ use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
 use peat_sapient::{
     codec::{SapientCodec, MAX_FRAME_BYTES},
-    proto::{
-        sapient_msg::bsi_flex_335_v2_0::Error as ProtoError, Content, SapientMessage,
-    },
+    proto::{sapient_msg::bsi_flex_335_v2_0::Error as ProtoError, Content, SapientMessage},
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -17,7 +15,10 @@ use tokio_util::codec::{Encoder, FramedRead, FramedWrite};
 
 fn error_msg(node_id: &str, text: &str) -> SapientMessage {
     SapientMessage {
-        timestamp: Some(Timestamp { seconds: 1_700_000_000, nanos: 0 }),
+        timestamp: Some(Timestamp {
+            seconds: 1_700_000_000,
+            nanos: 0,
+        }),
         node_id: Some(node_id.into()),
         content: Some(Content::Error(ProtoError {
             error_message: vec![text.into()],

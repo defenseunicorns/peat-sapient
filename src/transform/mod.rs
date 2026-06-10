@@ -4,8 +4,8 @@
 //! until Phase 3 implementation — the module structure and public API
 //! are declared here so the feature-flag plumbing compiles from day one.
 
+pub mod alert;
 pub mod detection;
 pub mod registration;
 pub mod status;
 pub mod task;
-pub mod alert;

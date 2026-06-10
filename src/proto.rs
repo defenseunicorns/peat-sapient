@@ -15,7 +15,6 @@ pub mod sapient_msg {
 
 // Convenience re-exports for the types callers use most.
 pub use sapient_msg::bsi_flex_335_v2_0::{
-    sapient_message::Content, Alert, AlertAck, DetectionReport,
-    Error as SapientProtoError, Registration, RegistrationAck,
-    SapientMessage, StatusReport, Task, TaskAck,
+    sapient_message::Content, Alert, AlertAck, DetectionReport, Error as SapientProtoError,
+    Registration, RegistrationAck, SapientMessage, StatusReport, Task, TaskAck,
 };
