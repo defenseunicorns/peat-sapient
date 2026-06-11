@@ -13,6 +13,7 @@ use tracing::warn;
 use crate::{
     error::SapientError,
     proto::sapient_msg::bsi_flex_335_v2_0::{sapient_message::Content, SapientMessage},
+    rate_limit::{DetectionLimiter, RateLimitConfig},
     transform::{alert, alert::SapientAlertEvent, detection, registration, status},
 };
 
@@ -40,6 +41,8 @@ pub enum SapientUpdate {
     },
     /// Message was received but has no peat mapping (e.g. TaskAck, AlertAck, Task).
     Ignored { reason: String },
+    /// A node stopped sending heartbeats and was removed by the watchdog.
+    NodeDisconnected { node_id: String },
 }
 
 /// Bridge configuration.
@@ -49,16 +52,28 @@ pub struct BridgeConfig {
     pub node_id: String,
     /// TCP address to listen on (HLDMM mode) or connect to (DLMM mode).
     pub addr: std::net::SocketAddr,
+    /// Per-node detection rate limit. `None` disables rate limiting.
+    pub detection_rate_limit: Option<RateLimitConfig>,
+    /// Interval between heartbeat checks. Nodes silent for `2 ×` this duration are
+    /// disconnected. Defaults to 30 s per SAPIENT ICD.
+    pub heartbeat_interval: std::time::Duration,
 }
 
 /// Bridge state and entry points.
 pub struct SapientBridge {
     pub config: BridgeConfig,
+    /// Rate limiter instantiated from `config.detection_rate_limit`. Used by Phase 4 routing loop.
+    #[allow(dead_code)]
+    detection_limiter: Option<DetectionLimiter>,
 }
 
 impl SapientBridge {
     pub fn new(config: BridgeConfig) -> Self {
-        Self { config }
+        let detection_limiter = config.detection_rate_limit.map(DetectionLimiter::new);
+        Self {
+            config,
+            detection_limiter,
+        }
     }
 
     /// Phase 4 stub — will start the TCP listener and pump `route_message` in a task.
@@ -72,11 +87,15 @@ impl SapientBridge {
 /// `sensor_position` — if `Some`, used to resolve range-bearing detections.
 /// Passing `None` causes `UnsupportedCoordinateSystem` for range-bearing reports.
 ///
+/// `detection_limiter` — if `Some`, `DetectionReport` messages that exceed the
+/// per-node token bucket are dropped as `Ignored` rather than emitted as `Detected`.
+///
 /// All unhandled `Content` variants produce `SapientUpdate::Ignored` so that
 /// unexpected messages never panic the bridge loop.
 pub fn route_message(
     msg: SapientMessage,
     sensor_position: Option<&TrackPosition>,
+    detection_limiter: Option<&DetectionLimiter>,
 ) -> Result<SapientUpdate, SapientError> {
     let node_id = msg.node_id.clone().unwrap_or_default();
 
@@ -99,6 +118,13 @@ pub fn route_message(
         }
 
         Some(Content::DetectionReport(dr)) => {
+            if let Some(limiter) = detection_limiter {
+                if !limiter.check(&node_id) {
+                    let reason = format!("detection rate-limited for node {node_id}");
+                    warn!(node_id = %node_id, "DetectionReport rate-limited — dropping");
+                    return Ok(SapientUpdate::Ignored { reason });
+                }
+            }
             let track = detection::from_detection_report(&node_id, sensor_position, &dr)?;
             Ok(SapientUpdate::Detected { node_id, track })
         }
@@ -164,7 +190,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let update = route_message(msg_with("node-1", Content::Registration(reg)), None).unwrap();
+        let update =
+            route_message(msg_with("node-1", Content::Registration(reg)), None, None).unwrap();
         assert!(matches!(update, SapientUpdate::Registered { .. }));
     }
 
@@ -177,8 +204,12 @@ mod tests {
             }],
             ..Default::default()
         };
-        let update =
-            route_message(msg_with("sensor-uuid", Content::Registration(reg)), None).unwrap();
+        let update = route_message(
+            msg_with("sensor-uuid", Content::Registration(reg)),
+            None,
+            None,
+        )
+        .unwrap();
         if let SapientUpdate::Registered { node_id, .. } = update {
             assert_eq!(node_id, "sensor-uuid");
         } else {
@@ -194,7 +225,8 @@ mod tests {
             system: Some(System::Ok as i32),
             ..Default::default()
         };
-        let update = route_message(msg_with("node-2", Content::StatusReport(sr)), None).unwrap();
+        let update =
+            route_message(msg_with("node-2", Content::StatusReport(sr)), None, None).unwrap();
         assert!(matches!(update, SapientUpdate::StatusUpdated { .. }));
     }
 
@@ -204,7 +236,8 @@ mod tests {
             system: Some(System::Warning as i32),
             ..Default::default()
         };
-        let update = route_message(msg_with("my-sensor", Content::StatusReport(sr)), None).unwrap();
+        let update =
+            route_message(msg_with("my-sensor", Content::StatusReport(sr)), None, None).unwrap();
         if let SapientUpdate::StatusUpdated { node_id, .. } = update {
             assert_eq!(node_id, "my-sensor");
         } else {
@@ -233,8 +266,12 @@ mod tests {
             })),
             ..Default::default()
         };
-        let update =
-            route_message(msg_with("sensor-1", Content::DetectionReport(dr)), None).unwrap();
+        let update = route_message(
+            msg_with("sensor-1", Content::DetectionReport(dr)),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(matches!(update, SapientUpdate::Detected { .. }));
     }
 
@@ -243,8 +280,12 @@ mod tests {
     #[test]
     fn task_ack_routes_to_ignored() {
         use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
-        let update =
-            route_message(msg_with("n", Content::TaskAck(TaskAck::default())), None).unwrap();
+        let update = route_message(
+            msg_with("n", Content::TaskAck(TaskAck::default())),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(matches!(update, SapientUpdate::Ignored { .. }));
     }
 
@@ -253,6 +294,7 @@ mod tests {
         use crate::proto::sapient_msg::bsi_flex_335_v2_0::RegistrationAck;
         let update = route_message(
             msg_with("n", Content::RegistrationAck(RegistrationAck::default())),
+            None,
             None,
         )
         .unwrap();
@@ -266,15 +308,19 @@ mod tests {
             content: None,
             ..Default::default()
         };
-        let update = route_message(msg, None).unwrap();
+        let update = route_message(msg, None, None).unwrap();
         assert!(matches!(update, SapientUpdate::Ignored { .. }));
     }
 
     #[test]
     fn ignored_does_not_panic_on_unknown_content() {
         use crate::proto::sapient_msg::bsi_flex_335_v2_0::AlertAck;
-        let update =
-            route_message(msg_with("n", Content::AlertAck(AlertAck::default())), None).unwrap();
+        let update = route_message(
+            msg_with("n", Content::AlertAck(AlertAck::default())),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(matches!(update, SapientUpdate::Ignored { .. }));
     }
 
@@ -294,7 +340,7 @@ mod tests {
             description: Some("test alert".into()),
             ..Default::default()
         };
-        let update = route_message(msg_with("sensor-a", Content::Alert(a)), None).unwrap();
+        let update = route_message(msg_with("sensor-a", Content::Alert(a)), None, None).unwrap();
         assert!(matches!(update, SapientUpdate::Alerted { .. }));
     }
 
@@ -306,12 +352,103 @@ mod tests {
             alert_type: Some(AlertType::Critical as i32),
             ..Default::default()
         };
-        let update = route_message(msg_with("my-sensor", Content::Alert(a)), None).unwrap();
+        let update = route_message(msg_with("my-sensor", Content::Alert(a)), None, None).unwrap();
         if let SapientUpdate::Alerted { node_id, event } = update {
             assert_eq!(node_id, "my-sensor");
             assert_eq!(event.alert_id, "alert-uuid-001");
         } else {
             panic!("expected Alerted");
+        }
+    }
+
+    // --- Rate limiting ---
+
+    fn detection_msg(node_id: &str) -> SapientMessage {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::{
+            detection_report::LocationOneof, DetectionReport, Location, LocationCoordinateSystem,
+            LocationDatum,
+        };
+        msg_with(
+            node_id,
+            Content::DetectionReport(DetectionReport {
+                report_id: Some("rpt-rl".into()),
+                object_id: Some("obj-rl".into()),
+                location_oneof: Some(LocationOneof::Location(Location {
+                    x: Some(-0.1278),
+                    y: Some(51.5074),
+                    z: Some(0.0),
+                    coordinate_system: Some(LocationCoordinateSystem::LatLngDegM as i32),
+                    datum: Some(LocationDatum::Wgs84E as i32),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn burst_of_detections_drops_excess() {
+        use crate::rate_limit::{DetectionLimiter, RateLimitConfig};
+        let limiter = DetectionLimiter::new(RateLimitConfig {
+            max_per_second: 10.0,
+            burst_size: 2,
+        });
+
+        // First 2 should be emitted (burst_size = 2)
+        let r1 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
+        let r2 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
+        // 3rd exceeds burst — must be Ignored
+        let r3 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
+
+        assert!(
+            matches!(r1, SapientUpdate::Detected { .. }),
+            "1st should be Detected"
+        );
+        assert!(
+            matches!(r2, SapientUpdate::Detected { .. }),
+            "2nd should be Detected"
+        );
+        assert!(
+            matches!(&r3, SapientUpdate::Ignored { reason } if reason.contains("rate-limited")),
+            "3rd should be Ignored (rate-limited)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn detections_resume_after_token_refill() {
+        use crate::rate_limit::{DetectionLimiter, RateLimitConfig};
+        use std::time::Duration;
+        let limiter = DetectionLimiter::new(RateLimitConfig {
+            max_per_second: 10.0, // 1 token per 100ms
+            burst_size: 1,
+        });
+
+        let r1 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
+        let r2 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
+        assert!(matches!(r1, SapientUpdate::Detected { .. }));
+        assert!(
+            matches!(&r2, SapientUpdate::Ignored { .. }),
+            "should be dropped"
+        );
+
+        tokio::time::advance(Duration::from_millis(100)).await;
+
+        let r3 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
+        assert!(
+            matches!(r3, SapientUpdate::Detected { .. }),
+            "should pass after refill"
+        );
+    }
+
+    #[test]
+    fn no_limiter_forwards_all_detections() {
+        // All 5 detections should pass when limiter is None
+        for i in 0..5 {
+            let r = route_message(detection_msg(&format!("node-{i}")), None, None).unwrap();
+            assert!(
+                matches!(r, SapientUpdate::Detected { .. }),
+                "detection {i} should be Detected with no limiter"
+            );
         }
     }
 }
