@@ -9,10 +9,10 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use peat_schema::{capability::v1::CapabilityAdvertisement, track::v1::TrackPosition};
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 
 /// State for a single connected SAPIENT DLMM.
 #[derive(Debug, Clone)]

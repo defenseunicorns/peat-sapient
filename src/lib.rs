@@ -42,9 +42,13 @@ pub mod proto;
 #[cfg(feature = "peat")]
 pub mod bridge;
 #[cfg(feature = "peat")]
+pub mod rate_limit;
+#[cfg(feature = "peat")]
 pub mod registry;
 #[cfg(feature = "peat")]
 pub mod transform;
+#[cfg(feature = "peat")]
+pub mod watchdog;
 
 pub use error::SapientError;
 pub use proto::{
