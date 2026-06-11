@@ -138,10 +138,7 @@ impl SapientBridge {
         let listener = TcpListener::bind(self.inner.config.addr)
             .await
             .map_err(|e| {
-                SapientError::ConnectionFailed(format!(
-                    "bind {}: {e}",
-                    self.inner.config.addr
-                ))
+                SapientError::ConnectionFailed(format!("bind {}: {e}", self.inner.config.addr))
             })?;
         info!(addr = %self.inner.config.addr, "SAPIENT HLDMM listening");
 
@@ -248,9 +245,7 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
 
         // On first Registration from this connection: register, send RegistrationAck,
         // and replay any pending DIL tasks for this node.
-        if matches!(&msg.content, Some(Content::Registration(_)))
-            && registered_node_id.is_none()
-        {
+        if matches!(&msg.content, Some(Content::Registration(_))) && registered_node_id.is_none() {
             registered_node_id = Some(msg_node_id.clone());
             inner
                 .connections
@@ -259,10 +254,7 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
                 .insert(msg_node_id.clone(), write_tx.clone());
 
             write_tx
-                .send(make_registration_ack(
-                    &inner.config.node_id,
-                    &msg_node_id,
-                ))
+                .send(make_registration_ack(&inner.config.node_id, &msg_node_id))
                 .await
                 .ok();
 
@@ -281,9 +273,11 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
         match route_message(msg, sensor_pos.as_ref(), inner.detection_limiter.as_ref()) {
             Ok(update) => {
                 match &update {
-                    SapientUpdate::Registered { node_id, advertisement } => {
-                        upsert(&inner.registry, node_id, Some(advertisement.clone()), None)
-                            .await;
+                    SapientUpdate::Registered {
+                        node_id,
+                        advertisement,
+                    } => {
+                        upsert(&inner.registry, node_id, Some(advertisement.clone()), None).await;
                     }
                     SapientUpdate::StatusUpdated {
                         node_id,
@@ -589,8 +583,7 @@ mod tests {
             task_status: Some(task_ack::TaskStatus::Accepted as i32),
             ..Default::default()
         };
-        let update =
-            route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
         if let SapientUpdate::TaskAcknowledged {
             task_id, accepted, ..
         } = update
@@ -611,8 +604,7 @@ mod tests {
             reason: vec!["out of fuel".into()],
             ..Default::default()
         };
-        let update =
-            route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
         if let SapientUpdate::TaskAcknowledged {
             accepted, reasons, ..
         } = update
@@ -735,8 +727,14 @@ mod tests {
         let r2 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
         let r3 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
 
-        assert!(matches!(r1, SapientUpdate::Detected { .. }), "1st should be Detected");
-        assert!(matches!(r2, SapientUpdate::Detected { .. }), "2nd should be Detected");
+        assert!(
+            matches!(r1, SapientUpdate::Detected { .. }),
+            "1st should be Detected"
+        );
+        assert!(
+            matches!(r2, SapientUpdate::Detected { .. }),
+            "2nd should be Detected"
+        );
         assert!(
             matches!(&r3, SapientUpdate::Ignored { reason } if reason.contains("rate-limited")),
             "3rd should be Ignored (rate-limited)"
@@ -755,12 +753,18 @@ mod tests {
         let r1 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
         let r2 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
         assert!(matches!(r1, SapientUpdate::Detected { .. }));
-        assert!(matches!(&r2, SapientUpdate::Ignored { .. }), "should be dropped");
+        assert!(
+            matches!(&r2, SapientUpdate::Ignored { .. }),
+            "should be dropped"
+        );
 
         tokio::time::advance(Duration::from_millis(100)).await;
 
         let r3 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
-        assert!(matches!(r3, SapientUpdate::Detected { .. }), "should pass after refill");
+        assert!(
+            matches!(r3, SapientUpdate::Detected { .. }),
+            "should pass after refill"
+        );
     }
 
     #[test]

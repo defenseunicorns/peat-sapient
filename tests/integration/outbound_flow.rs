@@ -121,7 +121,10 @@ async fn task_sent_and_task_ack_received_loopback() {
     // Route the TaskAck — it should produce TaskAcknowledged.
     let update = route_message(ack_msg, None, None).expect("route_message on TaskAck");
     assert!(
-        matches!(update, SapientUpdate::TaskAcknowledged { accepted: true, .. }),
+        matches!(
+            update,
+            SapientUpdate::TaskAcknowledged { accepted: true, .. }
+        ),
         "TaskAck should route to TaskAcknowledged(accepted=true), got {update:?}"
     );
 

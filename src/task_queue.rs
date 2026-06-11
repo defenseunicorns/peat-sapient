@@ -178,7 +178,10 @@ mod tests {
         q.enqueue("node-1", "task-a".into(), task_msg("task-a"));
         q.enqueue("node-1", "task-b".into(), task_msg("task-b"));
         q.enqueue("node-1", "task-c".into(), task_msg("task-c"));
-        assert_eq!(task_ids(&q.pending_for("node-1")), ["task-a", "task-b", "task-c"]);
+        assert_eq!(
+            task_ids(&q.pending_for("node-1")),
+            ["task-a", "task-b", "task-c"]
+        );
     }
 
     #[tokio::test]
@@ -213,7 +216,10 @@ mod tests {
         q.enqueue("node-1", "task-c".into(), task_msg("task-c"));
         let ids = task_ids(&q.pending_for("node-1"));
         assert_eq!(ids.len(), 2);
-        assert!(!ids.contains(&"task-a".to_string()), "task-a should have been evicted");
+        assert!(
+            !ids.contains(&"task-a".to_string()),
+            "task-a should have been evicted"
+        );
         assert!(ids.contains(&"task-b".to_string()));
         assert!(ids.contains(&"task-c".to_string()));
     }
@@ -262,7 +268,11 @@ mod tests {
         tokio::time::advance(Duration::from_secs(30)).await;
         q.drain_expired();
 
-        assert_eq!(q.pending_for("node-1").len(), 1, "fresh task should survive");
+        assert_eq!(
+            q.pending_for("node-1").len(),
+            1,
+            "fresh task should survive"
+        );
     }
 
     #[tokio::test(start_paused = true)]

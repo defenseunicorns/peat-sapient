@@ -219,8 +219,7 @@ async fn task_ack_prevents_replay_on_reconnect() {
             .unwrap(); // Registered
 
         // HLDMM sends task.
-        let task_msg =
-            to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
+        let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
         let task_id = match &task_msg.content {
             Some(Content::Task(t)) => t.task_id.clone().unwrap(),
             _ => panic!("expected Task content"),
@@ -260,10 +259,9 @@ async fn task_ack_prevents_replay_on_reconnect() {
         .unwrap(); // NodeDisconnected
 
     // --- Second connection: no task should be replayed ---
-    let mut dlmm2 =
-        connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
-            .await
-            .unwrap();
+    let mut dlmm2 = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
     connection::send(&mut dlmm2, registration_msg("dlmm-test-uuid"))
         .await
         .unwrap();
@@ -298,10 +296,9 @@ async fn expired_task_is_not_replayed_on_reconnect() {
     tokio::time::advance(Duration::from_secs(6)).await;
 
     // DLMM connects.
-    let mut dlmm =
-        connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
-            .await
-            .unwrap();
+    let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
     connection::send(&mut dlmm, registration_msg("dlmm-test-uuid"))
         .await
         .unwrap();
