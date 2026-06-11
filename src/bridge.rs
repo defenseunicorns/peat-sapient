@@ -1,19 +1,32 @@
-//! `SapientBridge` — routes inbound SAPIENT messages to peat-schema updates.
+//! `SapientBridge` — HLDMM-mode TCP server with DIL outbound task queue.
 //!
-//! Phase 4 will wire `start()` to the live TCP connection; for now `route_message`
-//! is a pure, synchronously testable function that owns all mapping logic.
+//! The bridge routes inbound SAPIENT messages to `SapientUpdate` events and
+//! delivers outbound `Task` messages to connected DLMMs, queuing them for
+//! replay on reconnect.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use futures_util::{SinkExt, StreamExt};
 use peat_schema::{
     capability::v1::CapabilityAdvertisement,
     node::v1::NodeState,
     track::v1::{Track, TrackPosition},
 };
-use tracing::warn;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, Mutex};
+use tokio_util::codec::{FramedRead, FramedWrite};
+use tracing::{debug, info, warn};
 
 use crate::{
+    codec::SapientCodec,
     error::SapientError,
-    proto::sapient_msg::bsi_flex_335_v2_0::{sapient_message::Content, SapientMessage},
+    proto::sapient_msg::bsi_flex_335_v2_0::{
+        sapient_message::Content, task_ack, RegistrationAck, SapientMessage,
+    },
     rate_limit::{DetectionLimiter, RateLimitConfig},
+    registry::{get_position, new_registry, remove, upsert, NodeRegistry},
+    task_queue::TaskQueue,
     transform::{alert, alert::SapientAlertEvent, detection, registration, status},
 };
 
@@ -39,46 +52,320 @@ pub enum SapientUpdate {
         node_id: String,
         event: SapientAlertEvent,
     },
-    /// Message was received but has no peat mapping (e.g. TaskAck, AlertAck, Task).
+    /// A DLMM acknowledged a task sent by the bridge.
+    TaskAcknowledged {
+        node_id: String,
+        task_id: String,
+        /// `true` if `TaskAck::Accepted`, `false` if rejected, failed, or unknown.
+        accepted: bool,
+        /// Reasons provided by the DLMM (empty when accepted).
+        reasons: Vec<String>,
+    },
+    /// Message was received but has no peat mapping (e.g. `RegistrationAck`, `Error`).
     Ignored { reason: String },
-    /// A node stopped sending heartbeats and was removed by the watchdog.
+    /// A node stopped sending heartbeats (watchdog timeout) or closed its TCP
+    /// connection. The node has already been removed from the `NodeRegistry`.
     NodeDisconnected { node_id: String },
 }
 
 /// Bridge configuration.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// UUID this bridge presents as its SAPIENT node_id.
+    /// UUID this bridge presents as its SAPIENT `node_id`.
     pub node_id: String,
-    /// TCP address to listen on (HLDMM mode) or connect to (DLMM mode).
+    /// TCP address to bind (`start()` listens here in HLDMM mode).
     pub addr: std::net::SocketAddr,
-    /// Per-node detection rate limit. `None` disables rate limiting.
+    /// Per-node `DetectionReport` rate limit. `None` disables rate limiting.
     pub detection_rate_limit: Option<RateLimitConfig>,
-    /// Interval between heartbeat checks. Nodes silent for `2 ×` this duration are
-    /// disconnected. Defaults to 30 s per SAPIENT ICD.
+    /// Interval between heartbeat checks. Nodes silent for `2 ×` this duration
+    /// emit `NodeDisconnected`. Defaults to 30 s per the SAPIENT ICD.
     pub heartbeat_interval: std::time::Duration,
+    /// Maximum number of unacknowledged outbound tasks queued per DLMM node.
+    /// When full, the oldest pending task is evicted. Recommended value: 32.
+    pub task_queue_depth: usize,
+    /// Maximum age of a queued task before it is discarded rather than replayed
+    /// on reconnect. Recommended value: 300 s (5 min).
+    pub task_ttl: std::time::Duration,
 }
 
-/// Bridge state and entry points.
-pub struct SapientBridge {
-    pub config: BridgeConfig,
-    /// Rate limiter instantiated from `config.detection_rate_limit`. Used by Phase 4 routing loop.
-    #[allow(dead_code)]
+/// Shared runtime state held behind an `Arc` so the accept-loop background
+/// tasks and the public `send_task()` / `registry()` API share it safely.
+struct BridgeInner {
+    config: BridgeConfig,
     detection_limiter: Option<DetectionLimiter>,
+    /// `node_id` → sender for writing to that DLMM's live TCP connection.
+    connections: Mutex<HashMap<String, mpsc::Sender<SapientMessage>>>,
+    /// Per-node DIL outbound task queue.
+    task_queue: Mutex<TaskQueue>,
+    /// Registry of all registered (connected) SAPIENT nodes.
+    registry: NodeRegistry,
+    /// Emits `SapientUpdate` events to the application receive loop.
+    update_tx: mpsc::Sender<SapientUpdate>,
+}
+
+/// SAPIENT bridge: HLDMM-mode TCP server that routes inbound sensor messages
+/// and queues outbound `Task` messages with DIL replay on reconnect.
+pub struct SapientBridge {
+    inner: Arc<BridgeInner>,
 }
 
 impl SapientBridge {
-    pub fn new(config: BridgeConfig) -> Self {
+    /// Create a new bridge. Returns `(bridge, update_receiver)`.
+    ///
+    /// The application drives `update_receiver` to consume `SapientUpdate`
+    /// events from the bridge. Call `start()` to begin accepting connections.
+    pub fn new(config: BridgeConfig) -> (Self, mpsc::Receiver<SapientUpdate>) {
+        let (update_tx, update_rx) = mpsc::channel(256);
         let detection_limiter = config.detection_rate_limit.map(DetectionLimiter::new);
-        Self {
-            config,
+        let task_queue = Mutex::new(TaskQueue::new(config.task_queue_depth, config.task_ttl));
+        let inner = Arc::new(BridgeInner {
             detection_limiter,
+            task_queue,
+            connections: Mutex::new(HashMap::new()),
+            registry: new_registry(),
+            update_tx,
+            config,
+        });
+        (Self { inner }, update_rx)
+    }
+
+    /// Start the bridge in HLDMM mode: bind `config.addr` and accept incoming
+    /// DLMM connections. Each connection is handled in a dedicated tokio task.
+    ///
+    /// Returns immediately after spawning the accept loop. Returns `Err` if the
+    /// TCP bind fails (e.g. address already in use).
+    pub async fn start(&self) -> Result<(), SapientError> {
+        let listener = TcpListener::bind(self.inner.config.addr)
+            .await
+            .map_err(|e| {
+                SapientError::ConnectionFailed(format!(
+                    "bind {}: {e}",
+                    self.inner.config.addr
+                ))
+            })?;
+        info!(addr = %self.inner.config.addr, "SAPIENT HLDMM listening");
+
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, peer)) => {
+                        debug!(%peer, "SAPIENT DLMM connected");
+                        let inner_c = Arc::clone(&inner);
+                        tokio::spawn(run_connection(stream, inner_c));
+                    }
+                    Err(e) => warn!(error = %e, "SAPIENT accept error"),
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Enqueue a `SapientMessage` carrying a `Task` for delivery to `node_id`.
+    ///
+    /// The task is enqueued immediately. If the DLMM is currently connected, it
+    /// is also sent without waiting for the queue. The task remains queued until
+    /// a `TaskAck` is received; if the DLMM disconnects before acknowledging,
+    /// the task is replayed on the next reconnect (unless its TTL has elapsed).
+    ///
+    /// Returns `Err` if the message does not carry a `Task` with a non-empty
+    /// `task_id`.
+    pub async fn send_task(&self, node_id: &str, msg: SapientMessage) -> Result<(), SapientError> {
+        let task_id = extract_task_id(&msg)?;
+
+        {
+            let mut q = self.inner.task_queue.lock().await;
+            q.drain_expired();
+            q.enqueue(node_id, task_id, msg.clone());
+        }
+
+        // If the node is connected, send immediately. Errors are intentionally
+        // ignored — the task is in the queue and will be replayed on reconnect.
+        let conns = self.inner.connections.lock().await;
+        if let Some(tx) = conns.get(node_id) {
+            tx.send(msg).await.ok();
+        }
+
+        Ok(())
+    }
+
+    /// Return a clone of the `Arc` wrapping the node registry.
+    ///
+    /// Use this to pass the registry to `run_watchdog`:
+    /// ```rust,no_run
+    /// # use peat_sapient::bridge::{BridgeConfig, SapientBridge};
+    /// # use peat_sapient::watchdog::run_watchdog;
+    /// # use tokio::sync::mpsc;
+    /// # use std::time::Duration;
+    /// # async fn example() {
+    /// # let config = BridgeConfig {
+    /// #     node_id: "id".into(), addr: "0.0.0.0:5066".parse().unwrap(),
+    /// #     detection_rate_limit: None, heartbeat_interval: Duration::from_secs(30),
+    /// #     task_queue_depth: 32, task_ttl: Duration::from_secs(300),
+    /// # };
+    /// let (bridge, mut updates) = SapientBridge::new(config);
+    /// bridge.start().await.unwrap();
+    /// let (wd_tx, mut wd_rx) = mpsc::channel(64);
+    /// tokio::spawn(run_watchdog(bridge.registry(), Duration::from_secs(30), wd_tx));
+    /// # }
+    /// ```
+    pub fn registry(&self) -> NodeRegistry {
+        Arc::clone(&self.inner.registry)
+    }
+}
+
+/// Run the per-connection handler loop for one accepted DLMM TCP connection.
+async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
+    let (read_half, write_half) = tokio::io::split(stream);
+    let mut framed_read = FramedRead::new(read_half, SapientCodec);
+    let mut framed_write = FramedWrite::new(write_half, SapientCodec);
+
+    // Per-connection channel: callers write here; write task drains to the socket.
+    let (write_tx, mut write_rx) = mpsc::channel::<SapientMessage>(64);
+
+    tokio::spawn(async move {
+        while let Some(msg) = write_rx.recv().await {
+            if let Err(e) = framed_write.send(msg).await {
+                warn!(error = %e, "SAPIENT write error — closing write half");
+                break;
+            }
+        }
+    });
+
+    let mut registered_node_id: Option<String> = None;
+
+    while let Some(result) = framed_read.next().await {
+        let msg = match result {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "SAPIENT read error");
+                break;
+            }
+        };
+
+        let msg_node_id = msg.node_id.clone().unwrap_or_default();
+
+        // On first Registration from this connection: register, send RegistrationAck,
+        // and replay any pending DIL tasks for this node.
+        if matches!(&msg.content, Some(Content::Registration(_)))
+            && registered_node_id.is_none()
+        {
+            registered_node_id = Some(msg_node_id.clone());
+            inner
+                .connections
+                .lock()
+                .await
+                .insert(msg_node_id.clone(), write_tx.clone());
+
+            write_tx
+                .send(make_registration_ack(
+                    &inner.config.node_id,
+                    &msg_node_id,
+                ))
+                .await
+                .ok();
+
+            let pending = {
+                let mut q = inner.task_queue.lock().await;
+                q.drain_expired();
+                q.pending_for(&msg_node_id)
+            };
+            for task_msg in pending {
+                write_tx.send(task_msg).await.ok();
+            }
+        }
+
+        // Route the message and emit a SapientUpdate.
+        let sensor_pos = get_position(&inner.registry, &msg_node_id).await;
+        match route_message(msg, sensor_pos.as_ref(), inner.detection_limiter.as_ref()) {
+            Ok(update) => {
+                match &update {
+                    SapientUpdate::Registered { node_id, advertisement } => {
+                        upsert(&inner.registry, node_id, Some(advertisement.clone()), None)
+                            .await;
+                    }
+                    SapientUpdate::StatusUpdated {
+                        node_id,
+                        capability_delta,
+                        ..
+                    } => {
+                        upsert(&inner.registry, node_id, capability_delta.clone(), None).await;
+                    }
+                    SapientUpdate::Detected { node_id, .. } => {
+                        upsert(&inner.registry, node_id, None, None).await;
+                    }
+                    SapientUpdate::TaskAcknowledged {
+                        node_id, task_id, ..
+                    } => {
+                        inner.task_queue.lock().await.ack(node_id, task_id);
+                    }
+                    _ => {}
+                }
+                inner.update_tx.send(update).await.ok();
+            }
+            Err(e) => {
+                warn!(error = %e, node_id = %msg_node_id, "route_message error");
+            }
         }
     }
 
-    /// Phase 4 stub — will start the TCP listener and pump `route_message` in a task.
-    pub async fn start(&self) -> Result<(), SapientError> {
-        todo!("Phase 4: TCP lifecycle")
+    // Clean up on disconnect.
+    if let Some(nid) = registered_node_id {
+        inner.connections.lock().await.remove(&nid);
+        remove(&inner.registry, &nid).await;
+        inner
+            .update_tx
+            .send(SapientUpdate::NodeDisconnected { node_id: nid })
+            .await
+            .ok();
+    }
+}
+
+fn make_registration_ack(hldmm_node_id: &str, destination_id: &str) -> SapientMessage {
+    SapientMessage {
+        node_id: Some(hldmm_node_id.to_string()),
+        destination_id: Some(destination_id.to_string()),
+        timestamp: Some(now_proto_ts()),
+        content: Some(Content::RegistrationAck(RegistrationAck {
+            acceptance: Some(true),
+            ack_response_reason: vec![],
+        })),
+        additional_information: None,
+    }
+}
+
+fn now_proto_ts() -> prost_types::Timestamp {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    prost_types::Timestamp {
+        seconds: d.as_secs() as i64,
+        nanos: d.subsec_nanos() as i32,
+    }
+}
+
+/// Extract `task_id` from a `SapientMessage` wrapping a `Task`.
+///
+/// Returns `Err` if the message does not carry `Content::Task` or if `task_id`
+/// is empty.
+fn extract_task_id(msg: &SapientMessage) -> Result<String, SapientError> {
+    match &msg.content {
+        Some(Content::Task(task)) => {
+            let id = task.task_id.clone().unwrap_or_default();
+            if id.is_empty() {
+                Err(SapientError::MappingError {
+                    kind: "task_id",
+                    detail: "Task message has no task_id".into(),
+                })
+            } else {
+                Ok(id)
+            }
+        }
+        _ => Err(SapientError::MappingError {
+            kind: "content",
+            detail: "send_task requires a SapientMessage with Task content".into(),
+        }),
     }
 }
 
@@ -88,10 +375,12 @@ impl SapientBridge {
 /// Passing `None` causes `UnsupportedCoordinateSystem` for range-bearing reports.
 ///
 /// `detection_limiter` — if `Some`, `DetectionReport` messages that exceed the
-/// per-node token bucket are dropped as `Ignored` rather than emitted as `Detected`.
+/// per-node token bucket are dropped as `Ignored` rather than emitted as
+/// `Detected`.
 ///
-/// All unhandled `Content` variants produce `SapientUpdate::Ignored` so that
-/// unexpected messages never panic the bridge loop.
+/// All unhandled `Content` variants (e.g. `RegistrationAck`, `AlertAck`,
+/// `Error`) produce `SapientUpdate::Ignored` so unexpected messages never panic
+/// the bridge loop.
 pub fn route_message(
     msg: SapientMessage,
     sensor_position: Option<&TrackPosition>,
@@ -132,6 +421,21 @@ pub fn route_message(
         Some(Content::Alert(a)) => {
             let event = alert::from_alert(&node_id, &a);
             Ok(SapientUpdate::Alerted { node_id, event })
+        }
+
+        Some(Content::TaskAck(ack)) => {
+            let task_id = ack.task_id.unwrap_or_default();
+            let accepted = ack
+                .task_status
+                .and_then(|s| task_ack::TaskStatus::try_from(s).ok())
+                .map(|s| s == task_ack::TaskStatus::Accepted)
+                .unwrap_or(false);
+            Ok(SapientUpdate::TaskAcknowledged {
+                node_id,
+                task_id,
+                accepted,
+                reasons: ack.reason,
+            })
         }
 
         Some(other) => {
@@ -275,19 +579,52 @@ mod tests {
         assert!(matches!(update, SapientUpdate::Detected { .. }));
     }
 
-    // --- Ignored variants ---
+    // --- TaskAck ---
 
     #[test]
-    fn task_ack_routes_to_ignored() {
+    fn task_ack_accepted_routes_to_task_acknowledged() {
         use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
-        let update = route_message(
-            msg_with("n", Content::TaskAck(TaskAck::default())),
-            None,
-            None,
-        )
-        .unwrap();
-        assert!(matches!(update, SapientUpdate::Ignored { .. }));
+        let ack = TaskAck {
+            task_id: Some("01HZTASKID000000000000000000".into()),
+            task_status: Some(task_ack::TaskStatus::Accepted as i32),
+            ..Default::default()
+        };
+        let update =
+            route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        if let SapientUpdate::TaskAcknowledged {
+            task_id, accepted, ..
+        } = update
+        {
+            assert_eq!(task_id, "01HZTASKID000000000000000000");
+            assert!(accepted, "Accepted status should produce accepted=true");
+        } else {
+            panic!("expected TaskAcknowledged");
+        }
     }
+
+    #[test]
+    fn task_ack_rejected_produces_accepted_false() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
+        let ack = TaskAck {
+            task_id: Some("task-rej".into()),
+            task_status: Some(task_ack::TaskStatus::Rejected as i32),
+            reason: vec!["out of fuel".into()],
+            ..Default::default()
+        };
+        let update =
+            route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        if let SapientUpdate::TaskAcknowledged {
+            accepted, reasons, ..
+        } = update
+        {
+            assert!(!accepted);
+            assert_eq!(reasons, ["out of fuel"]);
+        } else {
+            panic!("expected TaskAcknowledged");
+        }
+    }
+
+    // --- Ignored variants ---
 
     #[test]
     fn registration_ack_routes_to_ignored() {
@@ -394,20 +731,12 @@ mod tests {
             burst_size: 2,
         });
 
-        // First 2 should be emitted (burst_size = 2)
         let r1 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
         let r2 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
-        // 3rd exceeds burst — must be Ignored
         let r3 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
 
-        assert!(
-            matches!(r1, SapientUpdate::Detected { .. }),
-            "1st should be Detected"
-        );
-        assert!(
-            matches!(r2, SapientUpdate::Detected { .. }),
-            "2nd should be Detected"
-        );
+        assert!(matches!(r1, SapientUpdate::Detected { .. }), "1st should be Detected");
+        assert!(matches!(r2, SapientUpdate::Detected { .. }), "2nd should be Detected");
         assert!(
             matches!(&r3, SapientUpdate::Ignored { reason } if reason.contains("rate-limited")),
             "3rd should be Ignored (rate-limited)"
@@ -419,30 +748,23 @@ mod tests {
         use crate::rate_limit::{DetectionLimiter, RateLimitConfig};
         use std::time::Duration;
         let limiter = DetectionLimiter::new(RateLimitConfig {
-            max_per_second: 10.0, // 1 token per 100ms
+            max_per_second: 10.0,
             burst_size: 1,
         });
 
         let r1 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
         let r2 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
         assert!(matches!(r1, SapientUpdate::Detected { .. }));
-        assert!(
-            matches!(&r2, SapientUpdate::Ignored { .. }),
-            "should be dropped"
-        );
+        assert!(matches!(&r2, SapientUpdate::Ignored { .. }), "should be dropped");
 
         tokio::time::advance(Duration::from_millis(100)).await;
 
         let r3 = route_message(detection_msg("node-1"), None, Some(&limiter)).unwrap();
-        assert!(
-            matches!(r3, SapientUpdate::Detected { .. }),
-            "should pass after refill"
-        );
+        assert!(matches!(r3, SapientUpdate::Detected { .. }), "should pass after refill");
     }
 
     #[test]
     fn no_limiter_forwards_all_detections() {
-        // All 5 detections should pass when limiter is None
         for i in 0..5 {
             let r = route_message(detection_msg(&format!("node-{i}")), None, None).unwrap();
             assert!(
@@ -450,5 +772,51 @@ mod tests {
                 "detection {i} should be Detected with no limiter"
             );
         }
+    }
+
+    // --- extract_task_id ---
+
+    #[test]
+    fn extract_task_id_from_valid_task_message() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::{task::Control, Task};
+        let msg = SapientMessage {
+            content: Some(Content::Task(Task {
+                task_id: Some("ulid-abc".into()),
+                control: Some(Control::Start as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert_eq!(extract_task_id(&msg).unwrap(), "ulid-abc");
+    }
+
+    #[test]
+    fn extract_task_id_missing_task_id_returns_err() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::{task::Control, Task};
+        let msg = SapientMessage {
+            content: Some(Content::Task(Task {
+                task_id: None,
+                control: Some(Control::Start as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        assert!(matches!(
+            extract_task_id(&msg),
+            Err(SapientError::MappingError { .. })
+        ));
+    }
+
+    #[test]
+    fn extract_task_id_wrong_content_returns_err() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::RegistrationAck;
+        let msg = SapientMessage {
+            content: Some(Content::RegistrationAck(RegistrationAck::default())),
+            ..Default::default()
+        };
+        assert!(matches!(
+            extract_task_id(&msg),
+            Err(SapientError::MappingError { .. })
+        ));
     }
 }

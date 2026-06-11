@@ -118,11 +118,11 @@ async fn task_sent_and_task_ack_received_loopback() {
         .unwrap()
         .expect("connection closed before TaskAck");
 
-    // Route the TaskAck — it should produce Ignored (no peat mapping for TaskAck)
+    // Route the TaskAck — it should produce TaskAcknowledged.
     let update = route_message(ack_msg, None, None).expect("route_message on TaskAck");
     assert!(
-        matches!(update, SapientUpdate::Ignored { .. }),
-        "TaskAck should route to Ignored, got {update:?}"
+        matches!(update, SapientUpdate::TaskAcknowledged { accepted: true, .. }),
+        "TaskAck should route to TaskAcknowledged(accepted=true), got {update:?}"
     );
 
     // Verify the DLMM side received a well-formed Task

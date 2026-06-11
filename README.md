@@ -150,7 +150,13 @@ let config = BridgeConfig {
     }),
     // Nodes silent for 2 × this duration emit NodeDisconnected.
     heartbeat_interval: Duration::from_secs(30), // SAPIENT ICD default
+    // Max unacknowledged outbound tasks queued per DLMM node.
+    task_queue_depth: 32,
+    // Tasks older than this are discarded rather than replayed on reconnect.
+    task_ttl: Duration::from_secs(300),
 };
+let (bridge, mut updates) = SapientBridge::new(config);
+bridge.start().await?;
 ```
 
 ### Heartbeat watchdog
@@ -158,14 +164,13 @@ let config = BridgeConfig {
 The watchdog runs as an independent task and emits `NodeDisconnected` events over a channel:
 
 ```rust
-use peat_sapient::{bridge::SapientUpdate, registry::new_registry, watchdog::run_watchdog};
+use peat_sapient::{bridge::SapientUpdate, watchdog::run_watchdog};
 use tokio::sync::mpsc;
 use std::time::Duration;
 
-let registry = new_registry();
-let (tx, mut rx) = mpsc::channel(64);
-
-tokio::spawn(run_watchdog(registry.clone(), Duration::from_secs(30), tx));
+// bridge is a SapientBridge returned from SapientBridge::new()
+let (wd_tx, mut wd_rx) = mpsc::channel(64);
+tokio::spawn(run_watchdog(bridge.registry(), Duration::from_secs(30), wd_tx));
 
 while let Some(event) = rx.recv().await {
     if let SapientUpdate::NodeDisconnected { node_id } = event {
@@ -255,6 +260,7 @@ the full integration suite.
 | Document | Contents |
 |----------|---------|
 | [docs/PLAN.md](docs/PLAN.md) | Phase-by-phase implementation plan and current status |
+| [docs/c2-collaboration.md](docs/c2-collaboration.md) | Peat ↔ SAPIENT C2 collaboration model; design tensions; what is and is not implemented |
 | [docs/compliance.md](docs/compliance.md) | BSI Flex 335 v2 test harness (manual compliance gate) |
 | [docs/developer-guide.md](docs/developer-guide.md) | Architecture, transforms, contributing |
 | [ADR-070](https://github.com/defenseunicorns/peat/blob/main/docs/adr/070-sapient-protocol-bridge.md) | Architecture decision record |
