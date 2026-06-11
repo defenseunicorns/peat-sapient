@@ -1,11 +1,16 @@
 //! `DetectionReport` → `peat_schema::track::v1::Track`
 //!
 //! Coordinate systems handled:
-//! - WGS84 lat/lon decimal degrees (`LatLngDegM`) — passthrough
-//! - WGS84 lat/lon radians (`LatLngRadM`) — converted to degrees
+//! - WGS84 lat/lon decimal degrees, altitude metres (`LatLngDegM`) — passthrough
+//! - WGS84 lat/lon radians, altitude metres (`LatLngRadM`) — lat/lon converted to degrees
+//! - WGS84 lat/lon decimal degrees, altitude feet (raw value 3, deprecated SAPIENT v7) — altitude converted to metres
+//! - WGS84 lat/lon radians, altitude feet (raw value 4, deprecated SAPIENT v7) — lat/lon converted to degrees, altitude to metres
 //! - UTM metres (`UtmM`) — inverse Transverse Mercator projection to WGS84
 //! - `RangeBearing` (sensor-relative) — requires sensor position; returns
 //!   `Err(SapientError::UnsupportedCoordinateSystem(_))` when position is `None`.
+//!
+//! Note: MGRS is not a `LocationCoordinateSystem` variant in BSI Flex 335 v2.0.
+//! ADR-070 anticipated it, but the vendored proto defines only the systems above.
 
 use peat_schema::track::v1::{SourceType, Track, TrackPosition, TrackSource, TrackState, Velocity};
 
@@ -16,6 +21,8 @@ use crate::{
         DetectionReport, EnuVelocity, Location, LocationCoordinateSystem, RangeBearing,
     },
 };
+
+const FEET_TO_METRES: f64 = 0.3048;
 
 // ── UTM → WGS84 (Transverse Mercator inverse, WGS84 ellipsoid) ───────────────
 
@@ -115,8 +122,32 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
     })?;
     let z = loc.z.unwrap_or(0.0);
 
-    let cs = LocationCoordinateSystem::try_from(loc.coordinate_system.unwrap_or(0))
-        .unwrap_or(LocationCoordinateSystem::Unspecified);
+    // Raw values 3 and 4 are reserved/removed from the BSI Flex 335 v2.0 enum
+    // (deprecated from SAPIENT v7: degrees/feet and radians/feet). Legacy sensors
+    // may still emit them; handle before the enum conversion so they don't silently
+    // fall through to UnsupportedCoordinateSystem.
+    let raw_cs = loc.coordinate_system.unwrap_or(0);
+    if raw_cs == 3 {
+        return Ok(TrackPosition {
+            latitude: y,
+            longitude: x,
+            altitude: (z * FEET_TO_METRES) as f32,
+            cep_m: 0.0,
+            vertical_error_m: 0.0,
+        });
+    }
+    if raw_cs == 4 {
+        return Ok(TrackPosition {
+            latitude: y.to_degrees(),
+            longitude: x.to_degrees(),
+            altitude: (z * FEET_TO_METRES) as f32,
+            cep_m: 0.0,
+            vertical_error_m: 0.0,
+        });
+    }
+
+    let cs =
+        LocationCoordinateSystem::try_from(raw_cs).unwrap_or(LocationCoordinateSystem::Unspecified);
 
     match cs {
         LocationCoordinateSystem::LatLngDegM => Ok(TrackPosition {
@@ -382,6 +413,71 @@ mod tests {
             (pos.longitude - lon_deg).abs() < 1e-4,
             "lon {}",
             pos.longitude
+        );
+    }
+
+    #[test]
+    fn lat_lng_deg_feet_altitude_converted_to_metres() {
+        // Raw coordinate_system value 3: degrees lat/lon, altitude in feet.
+        // 100 ft = 30.48 m exactly.
+        let report = DetectionReport {
+            report_id: Some("r1".into()),
+            object_id: Some("o1".into()),
+            location_oneof: Some(LocationOneof::Location(Location {
+                x: Some(-0.1278),
+                y: Some(51.5074),
+                z: Some(100.0), // feet
+                coordinate_system: Some(3),
+                datum: Some(LocationDatum::Wgs84E as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let track = from_detection_report("node-1", None, &report).unwrap();
+        let pos = track.position.unwrap();
+        assert!((pos.latitude - 51.5074).abs() < 1e-9);
+        assert!((pos.longitude - (-0.1278)).abs() < 1e-9);
+        assert!(
+            (pos.altitude - 30.48).abs() < 1e-3,
+            "100 ft should convert to 30.48 m, got {}",
+            pos.altitude
+        );
+    }
+
+    #[test]
+    fn lat_lng_rad_feet_altitude_converted() {
+        // Raw coordinate_system value 4: radians lat/lon, altitude in feet.
+        let lat_deg = 51.5074_f64;
+        let lon_deg = -0.1278_f64;
+        let report = DetectionReport {
+            report_id: Some("r1".into()),
+            object_id: Some("o1".into()),
+            location_oneof: Some(LocationOneof::Location(Location {
+                x: Some(lon_deg.to_radians()),
+                y: Some(lat_deg.to_radians()),
+                z: Some(200.0), // feet → 60.96 m
+                coordinate_system: Some(4),
+                datum: Some(LocationDatum::Wgs84E as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let track = from_detection_report("node-1", None, &report).unwrap();
+        let pos = track.position.unwrap();
+        assert!(
+            (pos.latitude - lat_deg).abs() < 1e-4,
+            "lat {}",
+            pos.latitude
+        );
+        assert!(
+            (pos.longitude - lon_deg).abs() < 1e-4,
+            "lon {}",
+            pos.longitude
+        );
+        assert!(
+            (pos.altitude - 60.96).abs() < 1e-2,
+            "200 ft should convert to 60.96 m, got {}",
+            pos.altitude
         );
     }
 

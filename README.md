@@ -215,9 +215,12 @@ let policy = ReconnectConfig {
 | System | Support | Notes |
 |--------|---------|-------|
 | World Geodetic System 1984 (WGS84) LatLng (`LatLngDegM`) | Full | `x` = longitude °, `y` = latitude °, `z` = altitude m |
-| Universal Transverse Mercator (UTM) | Full | Snyder series inverse projection → WGS84. Grid zone parsed from `coordinate_system`. |
+| WGS84 LatLng radians (`LatLngRadM`) | Full | lat/lon converted to degrees |
+| WGS84 LatLng degrees, altitude feet (raw value 3, deprecated SAPIENT v7) | Full | altitude converted to metres (1 ft = 0.3048 m) |
+| WGS84 LatLng radians, altitude feet (raw value 4, deprecated SAPIENT v7) | Full | lat/lon converted to degrees; altitude converted to metres |
+| Universal Transverse Mercator (UTM) | Full | Snyder series inverse projection → WGS84. Grid zone parsed from `utm_zone` field. |
 | Range/bearing (`RangeBearing`) | Requires sensor position | Pass the sensor's `last_position` from `NodeRegistry`; returns `UnsupportedCoordinateSystem` if absent. |
-| Military Grid Reference System (MGRS) | Not supported | Planned — tracked in `detection.rs`. |
+| Military Grid Reference System (MGRS) | N/A | Not a `LocationCoordinateSystem` variant in BSI Flex 335 v2.0. |
 
 ---
 
