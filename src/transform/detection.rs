@@ -1,16 +1,26 @@
 //! `DetectionReport` → `peat_schema::track::v1::Track`
 //!
 //! Coordinate systems handled:
-//! - WGS84 lat/lon decimal degrees, altitude metres (`LatLngDegM`) — passthrough
-//! - WGS84 lat/lon radians, altitude metres (`LatLngRadM`) — lat/lon converted to degrees
-//! - WGS84 lat/lon decimal degrees, altitude feet (raw value 3, deprecated SAPIENT v7) — altitude converted to metres
-//! - WGS84 lat/lon radians, altitude feet (raw value 4, deprecated SAPIENT v7) — lat/lon converted to degrees, altitude to metres
-//! - UTM metres (`UtmM`) — inverse Transverse Mercator projection to WGS84
-//! - `RangeBearing` (sensor-relative) — requires sensor position; returns
-//!   `Err(SapientError::UnsupportedCoordinateSystem(_))` when position is `None`.
+//!
+//! **Location** (`LocationCoordinateSystem`):
+//! - `LatLngDegM` (1) — lat/lon degrees, altitude metres; passthrough
+//! - `LatLngRadM` (2) — lat/lon radians, altitude metres; angles converted to degrees
+//! - raw 3 (deprecated SAPIENT v7: degrees/feet) — altitude converted to metres
+//! - raw 4 (deprecated SAPIENT v7: radians/feet) — angles to degrees, altitude to metres
+//! - `UtmM` (5) — UTM metres; inverse Transverse Mercator projection to WGS84
+//! - `x_error`/`y_error` → `cep_m` for all variants (1-σ errors in coordinate units)
+//!
+//! **RangeBearing** (`RangeBearingCoordinateSystem`):
+//! - `DegreesM` (1) — azimuth/elevation in degrees, range in metres; passthrough
+//! - `RadiansM` (2) — azimuth/elevation in radians; converted to degrees
+//! - `DegreesKm` (3) — range in km; converted to metres
+//! - `RadiansKm` (4) — angles in radians + range in km; both normalised
+//! - raw 5 (deprecated SAPIENT v7: degrees/feet) — range converted to metres
+//! - raw 6 (deprecated SAPIENT v7: radians/feet) — angles to degrees, range to metres
+//! - Requires sensor position; returns `Err(UnsupportedCoordinateSystem)` when `None`.
 //!
 //! Note: MGRS is not a `LocationCoordinateSystem` variant in BSI Flex 335 v2.0.
-//! ADR-070 anticipated it, but the vendored proto defines only the systems above.
+//! ADR-070 anticipated it, but the vendored proto defines only the variants above.
 
 use peat_schema::track::v1::{SourceType, Track, TrackPosition, TrackSource, TrackState, Velocity};
 
@@ -19,10 +29,104 @@ use crate::{
     proto::sapient_msg::bsi_flex_335_v2_0::{
         detection_report::{LocationOneof, VelocityOneof},
         DetectionReport, EnuVelocity, Location, LocationCoordinateSystem, RangeBearing,
+        RangeBearingCoordinateSystem,
     },
 };
 
 const FEET_TO_METRES: f64 = 0.3048;
+const KM_TO_METRES: f64 = 1_000.0;
+
+// ── Coordinate helpers ────────────────────────────────────────────────────────
+
+/// 50% CEP from two independent 1-σ errors in metres.
+/// Approximation: CEP ≈ 0.5887 × (σ_x + σ_y); exact when σ_x = σ_y.
+fn cep_from_errors_m(sigma_x_m: f64, sigma_y_m: f64) -> f32 {
+    (0.5887 * (sigma_x_m + sigma_y_m)) as f32
+}
+
+/// Convert a Location's 1-σ x/y errors (in coordinate-system units) to metres.
+/// Returns (sigma_x_m, sigma_y_m).
+fn location_errors_to_m(x_err: f64, y_err: f64, lat_deg: f64, raw_cs: i32) -> (f64, f64) {
+    let lat_rad = lat_deg.to_radians();
+    match raw_cs {
+        // Degrees (LatLngDegM or deprecated value 3): errors in degrees
+        1 | 3 => (
+            x_err.to_radians() * WGS84_A * lat_rad.cos(),
+            y_err.to_radians() * WGS84_A,
+        ),
+        // Radians (LatLngRadM or deprecated value 4): errors in radians
+        2 | 4 => (x_err * WGS84_A * lat_rad.cos(), y_err * WGS84_A),
+        // UTM (UtmM): errors already in metres
+        5 => (x_err, y_err),
+        _ => (0.0, 0.0),
+    }
+}
+
+/// Normalise a `RangeBearing` message to (range_m, azimuth_deg, elevation_deg,
+/// range_error_m), handling all `RangeBearingCoordinateSystem` variants including
+/// the deprecated SAPIENT v7 feet variants (raw values 5 and 6).
+fn normalize_rb(rb: &RangeBearing) -> Result<(f64, f64, f64, f64), SapientError> {
+    let range_raw = rb.range.ok_or_else(|| SapientError::MappingError {
+        kind: "range_bearing",
+        detail: "RangeBearing.range missing".into(),
+    })?;
+    let az_raw = rb.azimuth.ok_or_else(|| SapientError::MappingError {
+        kind: "range_bearing",
+        detail: "RangeBearing.azimuth missing".into(),
+    })?;
+    let el_raw = rb.elevation.unwrap_or(0.0);
+    let range_err_raw = rb.range_error.unwrap_or(0.0);
+
+    let raw_cs = rb.coordinate_system.unwrap_or(0);
+
+    // Deprecated from SAPIENT v7: raw 5 (degrees/feet) and 6 (radians/feet).
+    if raw_cs == 5 {
+        return Ok((
+            range_raw * FEET_TO_METRES,
+            az_raw,
+            el_raw,
+            range_err_raw * FEET_TO_METRES,
+        ));
+    }
+    if raw_cs == 6 {
+        return Ok((
+            range_raw * FEET_TO_METRES,
+            az_raw.to_degrees(),
+            el_raw.to_degrees(),
+            range_err_raw * FEET_TO_METRES,
+        ));
+    }
+
+    let cs = RangeBearingCoordinateSystem::try_from(raw_cs)
+        .unwrap_or(RangeBearingCoordinateSystem::Unspecified);
+
+    match cs {
+        RangeBearingCoordinateSystem::DegreesM => Ok((range_raw, az_raw, el_raw, range_err_raw)),
+        RangeBearingCoordinateSystem::RadiansM => Ok((
+            range_raw,
+            az_raw.to_degrees(),
+            el_raw.to_degrees(),
+            range_err_raw,
+        )),
+        RangeBearingCoordinateSystem::DegreesKm => Ok((
+            range_raw * KM_TO_METRES,
+            az_raw,
+            el_raw,
+            range_err_raw * KM_TO_METRES,
+        )),
+        RangeBearingCoordinateSystem::RadiansKm => Ok((
+            range_raw * KM_TO_METRES,
+            az_raw.to_degrees(),
+            el_raw.to_degrees(),
+            range_err_raw * KM_TO_METRES,
+        )),
+        RangeBearingCoordinateSystem::Unspecified => {
+            Err(SapientError::UnsupportedCoordinateSystem(
+                "unspecified range-bearing coordinate system".into(),
+            ))
+        }
+    }
+}
 
 // ── UTM → WGS84 (Transverse Mercator inverse, WGS84 ellipsoid) ───────────────
 
@@ -121,28 +225,34 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
         detail: "Location.y missing".into(),
     })?;
     let z = loc.z.unwrap_or(0.0);
+    let x_err = loc.x_error.unwrap_or(0.0);
+    let y_err = loc.y_error.unwrap_or(0.0);
+    let z_err = loc.z_error.unwrap_or(0.0);
+
+    let raw_cs = loc.coordinate_system.unwrap_or(0);
 
     // Raw values 3 and 4 are reserved/removed from the BSI Flex 335 v2.0 enum
     // (deprecated from SAPIENT v7: degrees/feet and radians/feet). Legacy sensors
-    // may still emit them; handle before the enum conversion so they don't silently
-    // fall through to UnsupportedCoordinateSystem.
-    let raw_cs = loc.coordinate_system.unwrap_or(0);
+    // may still emit them; handle before the enum conversion.
     if raw_cs == 3 {
+        let (sx, sy) = location_errors_to_m(x_err, y_err, y, raw_cs);
         return Ok(TrackPosition {
             latitude: y,
             longitude: x,
             altitude: (z * FEET_TO_METRES) as f32,
-            cep_m: 0.0,
-            vertical_error_m: 0.0,
+            cep_m: cep_from_errors_m(sx, sy),
+            vertical_error_m: (z_err * FEET_TO_METRES) as f32,
         });
     }
     if raw_cs == 4 {
+        let lat_deg = y.to_degrees();
+        let (sx, sy) = location_errors_to_m(x_err, y_err, lat_deg, raw_cs);
         return Ok(TrackPosition {
-            latitude: y.to_degrees(),
+            latitude: lat_deg,
             longitude: x.to_degrees(),
             altitude: (z * FEET_TO_METRES) as f32,
-            cep_m: 0.0,
-            vertical_error_m: 0.0,
+            cep_m: cep_from_errors_m(sx, sy),
+            vertical_error_m: (z_err * FEET_TO_METRES) as f32,
         });
     }
 
@@ -150,20 +260,27 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
         LocationCoordinateSystem::try_from(raw_cs).unwrap_or(LocationCoordinateSystem::Unspecified);
 
     match cs {
-        LocationCoordinateSystem::LatLngDegM => Ok(TrackPosition {
-            latitude: y,
-            longitude: x,
-            altitude: z as f32,
-            cep_m: 0.0,
-            vertical_error_m: 0.0,
-        }),
-        LocationCoordinateSystem::LatLngRadM => Ok(TrackPosition {
-            latitude: y.to_degrees(),
-            longitude: x.to_degrees(),
-            altitude: z as f32,
-            cep_m: 0.0,
-            vertical_error_m: 0.0,
-        }),
+        LocationCoordinateSystem::LatLngDegM => {
+            let (sx, sy) = location_errors_to_m(x_err, y_err, y, raw_cs);
+            Ok(TrackPosition {
+                latitude: y,
+                longitude: x,
+                altitude: z as f32,
+                cep_m: cep_from_errors_m(sx, sy),
+                vertical_error_m: z_err as f32,
+            })
+        }
+        LocationCoordinateSystem::LatLngRadM => {
+            let lat_deg = y.to_degrees();
+            let (sx, sy) = location_errors_to_m(x_err, y_err, lat_deg, raw_cs);
+            Ok(TrackPosition {
+                latitude: lat_deg,
+                longitude: x.to_degrees(),
+                altitude: z as f32,
+                cep_m: cep_from_errors_m(sx, sy),
+                vertical_error_m: z_err as f32,
+            })
+        }
         LocationCoordinateSystem::UtmM => {
             let zone_str = loc
                 .utm_zone
@@ -178,12 +295,13 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
                     detail: format!("invalid utm_zone: {zone_str}"),
                 })?;
             let (lat, lon) = utm_to_latlon(x, y, zone_num, northern);
+            let (sx, sy) = location_errors_to_m(x_err, y_err, lat, raw_cs);
             Ok(TrackPosition {
                 latitude: lat,
                 longitude: lon,
                 altitude: z as f32,
-                cep_m: 0.0,
-                vertical_error_m: 0.0,
+                cep_m: cep_from_errors_m(sx, sy),
+                vertical_error_m: z_err as f32,
             })
         }
         LocationCoordinateSystem::Unspecified => Err(SapientError::UnsupportedCoordinateSystem(
@@ -196,15 +314,7 @@ fn range_bearing_to_track_position(
     rb: &RangeBearing,
     sensor: &TrackPosition,
 ) -> Result<TrackPosition, SapientError> {
-    let range = rb.range.ok_or_else(|| SapientError::MappingError {
-        kind: "range_bearing",
-        detail: "RangeBearing.range missing".into(),
-    })?;
-    let azimuth_deg = rb.azimuth.ok_or_else(|| SapientError::MappingError {
-        kind: "range_bearing",
-        detail: "RangeBearing.azimuth missing".into(),
-    })?;
-    let elevation_deg = rb.elevation.unwrap_or(0.0);
+    let (range, azimuth_deg, elevation_deg, range_err) = normalize_rb(rb)?;
 
     // Convert spherical (range, azimuth, elevation) to Cartesian offset, then
     // add to sensor lat/lon using the small-angle flat-earth approximation.
@@ -224,7 +334,7 @@ fn range_bearing_to_track_position(
         latitude: sensor.latitude + north_m * lat_deg_per_m,
         longitude: sensor.longitude + east_m * lon_deg_per_m,
         altitude: sensor.altitude + up_m as f32,
-        cep_m: rb.range_error.unwrap_or(0.0) as f32,
+        cep_m: range_err as f32,
         vertical_error_m: 0.0,
     })
 }
@@ -566,6 +676,246 @@ mod tests {
         assert!(
             (pos.longitude - (-0.1)).abs() < 0.0001,
             "longitude unchanged"
+        );
+    }
+
+    fn sensor() -> TrackPosition {
+        TrackPosition {
+            latitude: 51.5,
+            longitude: -0.1,
+            altitude: 0.0,
+            cep_m: 0.0,
+            vertical_error_m: 0.0,
+        }
+    }
+
+    fn rb_report(range: f64, azimuth: f64, cs: i32) -> DetectionReport {
+        DetectionReport {
+            report_id: Some("r1".into()),
+            object_id: Some("o1".into()),
+            location_oneof: Some(LocationOneof::RangeBearing(RangeBearing {
+                range: Some(range),
+                azimuth: Some(azimuth),
+                elevation: Some(0.0),
+                coordinate_system: Some(cs),
+                datum: Some(RangeBearingDatum::True as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn range_bearing_radians_m_same_result_as_degrees_m() {
+        let deg = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(100.0, 45.0, RangeBearingCoordinateSystem::DegreesM as i32),
+        )
+        .unwrap();
+        let rad = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(
+                100.0,
+                45_f64.to_radians(),
+                RangeBearingCoordinateSystem::RadiansM as i32,
+            ),
+        )
+        .unwrap();
+        let pd = deg.position.unwrap();
+        let pr = rad.position.unwrap();
+        assert!(
+            (pd.latitude - pr.latitude).abs() < 1e-9,
+            "lat mismatch: {} vs {}",
+            pd.latitude,
+            pr.latitude
+        );
+        assert!(
+            (pd.longitude - pr.longitude).abs() < 1e-9,
+            "lon mismatch: {} vs {}",
+            pd.longitude,
+            pr.longitude
+        );
+    }
+
+    #[test]
+    fn range_bearing_degrees_km_same_result_as_degrees_m() {
+        let m = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(1000.0, 90.0, RangeBearingCoordinateSystem::DegreesM as i32),
+        )
+        .unwrap();
+        let km = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(1.0, 90.0, RangeBearingCoordinateSystem::DegreesKm as i32),
+        )
+        .unwrap();
+        let pm = m.position.unwrap();
+        let pk = km.position.unwrap();
+        assert!(
+            (pm.latitude - pk.latitude).abs() < 1e-9,
+            "lat: {} vs {}",
+            pm.latitude,
+            pk.latitude
+        );
+        assert!(
+            (pm.longitude - pk.longitude).abs() < 1e-9,
+            "lon: {} vs {}",
+            pm.longitude,
+            pk.longitude
+        );
+    }
+
+    #[test]
+    fn range_bearing_radians_km_same_result_as_degrees_m() {
+        let m = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(500.0, 180.0, RangeBearingCoordinateSystem::DegreesM as i32),
+        )
+        .unwrap();
+        let rkm = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(
+                0.5,
+                180_f64.to_radians(),
+                RangeBearingCoordinateSystem::RadiansKm as i32,
+            ),
+        )
+        .unwrap();
+        let pm = m.position.unwrap();
+        let pk = rkm.position.unwrap();
+        assert!(
+            (pm.latitude - pk.latitude).abs() < 1e-9,
+            "lat: {} vs {}",
+            pm.latitude,
+            pk.latitude
+        );
+        assert!(
+            (pm.longitude - pk.longitude).abs() < 1e-9,
+            "lon: {} vs {}",
+            pm.longitude,
+            pk.longitude
+        );
+    }
+
+    #[test]
+    fn range_bearing_deprecated_degrees_feet_converted() {
+        // Raw value 5: degrees/feet. 328.084 ft ≈ 100 m.
+        let ft = from_detection_report("n", Some(&sensor()), &rb_report(328.084, 0.0, 5)).unwrap();
+        let m = from_detection_report("n", Some(&sensor()), &rb_report(100.0, 0.0, 1)).unwrap();
+        let pf = ft.position.unwrap();
+        let pm = m.position.unwrap();
+        assert!(
+            (pf.latitude - pm.latitude).abs() < 1e-5,
+            "lat: {} vs {}",
+            pf.latitude,
+            pm.latitude
+        );
+    }
+
+    #[test]
+    fn range_bearing_deprecated_radians_feet_converted() {
+        // Raw value 6: radians/feet. 45° = π/4 rad; 100 m ≈ 328.084 ft.
+        let rf = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(328.084, 45_f64.to_radians(), 6),
+        )
+        .unwrap();
+        let dm = from_detection_report(
+            "n",
+            Some(&sensor()),
+            &rb_report(100.0, 45.0, RangeBearingCoordinateSystem::DegreesM as i32),
+        )
+        .unwrap();
+        let pr = rf.position.unwrap();
+        let pd = dm.position.unwrap();
+        assert!(
+            (pr.latitude - pd.latitude).abs() < 1e-5,
+            "lat: {} vs {}",
+            pr.latitude,
+            pd.latitude
+        );
+        assert!(
+            (pr.longitude - pd.longitude).abs() < 1e-5,
+            "lon: {} vs {}",
+            pr.longitude,
+            pd.longitude
+        );
+    }
+
+    #[test]
+    fn location_errors_produce_nonzero_cep_wgs84_deg() {
+        // 0.001° error at equator ≈ 111 m; CEP ≈ 0.5887 × 2 × 111 ≈ 131 m
+        let report = DetectionReport {
+            report_id: Some("r1".into()),
+            object_id: Some("o1".into()),
+            location_oneof: Some(LocationOneof::Location(Location {
+                x: Some(0.0),
+                y: Some(0.0),
+                z: Some(0.0),
+                x_error: Some(0.001),
+                y_error: Some(0.001),
+                coordinate_system: Some(LocationCoordinateSystem::LatLngDegM as i32),
+                datum: Some(LocationDatum::Wgs84E as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let pos = from_detection_report("n", None, &report)
+            .unwrap()
+            .position
+            .unwrap();
+        assert!(
+            pos.cep_m > 100.0 && pos.cep_m < 200.0,
+            "cep_m={}",
+            pos.cep_m
+        );
+        assert_eq!(pos.vertical_error_m, 0.0);
+    }
+
+    #[test]
+    fn location_errors_zero_when_not_provided() {
+        let pos = from_detection_report("n", None, &simple_detection(51.0, 0.0))
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(pos.cep_m, 0.0);
+        assert_eq!(pos.vertical_error_m, 0.0);
+    }
+
+    #[test]
+    fn utm_errors_passed_through_as_cep() {
+        // UTM errors are already in metres; 50 m each → CEP ≈ 0.5887 × 100 ≈ 58.9 m
+        let report = DetectionReport {
+            report_id: Some("r1".into()),
+            object_id: Some("o1".into()),
+            location_oneof: Some(LocationOneof::Location(Location {
+                x: Some(699_651.0),
+                y: Some(5_710_164.0),
+                z: Some(0.0),
+                x_error: Some(50.0),
+                y_error: Some(50.0),
+                coordinate_system: Some(LocationCoordinateSystem::UtmM as i32),
+                datum: Some(LocationDatum::Wgs84E as i32),
+                utm_zone: Some("30U".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let pos = from_detection_report("n", None, &report)
+            .unwrap()
+            .position
+            .unwrap();
+        assert!(
+            (pos.cep_m - 58.87).abs() < 1.0,
+            "expected ~58.87 m CEP, got {}",
+            pos.cep_m
         );
     }
 
