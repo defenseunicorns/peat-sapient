@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::{
     error::SapientError,
     proto::sapient_msg::bsi_flex_335_v2_0::{sapient_message::Content, SapientMessage},
-    transform::{detection, registration, status},
+    transform::{alert, alert::SapientAlertEvent, detection, registration, status},
 };
 
 /// A bridge update produced by routing one inbound SAPIENT message.
@@ -33,6 +33,11 @@ pub enum SapientUpdate {
     },
     /// A DLMM sent a `DetectionReport` that has been mapped to a peat `Track`.
     Detected { node_id: String, track: Track },
+    /// A DLMM sent an `Alert`.
+    Alerted {
+        node_id: String,
+        event: SapientAlertEvent,
+    },
     /// Message was received but has no peat mapping (e.g. TaskAck, AlertAck, Task).
     Ignored { reason: String },
 }
@@ -96,6 +101,11 @@ pub fn route_message(
         Some(Content::DetectionReport(dr)) => {
             let track = detection::from_detection_report(&node_id, sensor_position, &dr)?;
             Ok(SapientUpdate::Detected { node_id, track })
+        }
+
+        Some(Content::Alert(a)) => {
+            let event = alert::from_alert(&node_id, &a);
+            Ok(SapientUpdate::Alerted { node_id, event })
         }
 
         Some(other) => {
@@ -266,5 +276,42 @@ mod tests {
         let update =
             route_message(msg_with("n", Content::AlertAck(AlertAck::default())), None).unwrap();
         assert!(matches!(update, SapientUpdate::Ignored { .. }));
+    }
+
+    // --- Alert ---
+
+    #[test]
+    fn alert_routes_to_alerted() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::{
+            alert::{AlertStatus, AlertType, DiscretePriority},
+            Alert,
+        };
+        let a = Alert {
+            alert_id: Some("01HZALERTTEST00000000000000".into()),
+            alert_type: Some(AlertType::Warning as i32),
+            status: Some(AlertStatus::Active as i32),
+            priority: Some(DiscretePriority::High as i32),
+            description: Some("test alert".into()),
+            ..Default::default()
+        };
+        let update = route_message(msg_with("sensor-a", Content::Alert(a)), None).unwrap();
+        assert!(matches!(update, SapientUpdate::Alerted { .. }));
+    }
+
+    #[test]
+    fn alerted_carries_node_id_and_alert_id() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::{alert::AlertType, Alert};
+        let a = Alert {
+            alert_id: Some("alert-uuid-001".into()),
+            alert_type: Some(AlertType::Critical as i32),
+            ..Default::default()
+        };
+        let update = route_message(msg_with("my-sensor", Content::Alert(a)), None).unwrap();
+        if let SapientUpdate::Alerted { node_id, event } = update {
+            assert_eq!(node_id, "my-sensor");
+            assert_eq!(event.alert_id, "alert-uuid-001");
+        } else {
+            panic!("expected Alerted");
+        }
     }
 }
