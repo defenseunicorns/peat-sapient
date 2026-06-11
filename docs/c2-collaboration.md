@@ -259,7 +259,7 @@ requires knowing:
 
 ## What Currently Works vs. What Is Missing
 
-### Implemented (Phases 1–4 partial)
+### Implemented (Phases 1–4)
 
 | Capability | Location |
 |-----------|----------|
@@ -270,17 +270,19 @@ requires knowing:
 | Peat `HierarchicalCommand` → SAPIENT `Task` | `transform/task.rs` |
 | Per-node detection rate limiter | `rate_limit.rs` |
 | Heartbeat watchdog → `NodeDisconnected` | `watchdog.rs` |
+| `SapientBridge::start()` — HLDMM TCP listener + per-connection routing | `bridge.rs` |
+| `SapientBridge::send_task()` — enqueue + deliver; DIL replay on reconnect | `bridge.rs` |
+| DIL outbound task queue — per-node, TTL expiry, replay on reconnect | `task_queue.rs` |
+| `TaskAck` → `SapientUpdate::TaskAcknowledged` — closes command feedback loop | `bridge.rs` |
 | Integration test harness (Apex SAPIENT Middleware skip guard) | `tests/integration/` |
 
 ### Not Yet Implemented
 
-| Capability | Blocking on | Issue |
+| Capability | Blocking on | Notes |
 |-----------|------------|-------|
-| `SapientBridge::start()` — TCP lifecycle loop | Phase 4 | #15 (prerequisite) |
-| `SapientBridge::send_task()` — enqueue + await `TaskAck` | `start()` | #15 |
-| DIL outbound task queue — replay on reconnect, TTL expiry | `send_task()` | #15 |
-| `TaskAck` → `CommandAcknowledgment` feedback path | design decision | — |
-| Direction B: Peat as DLMM (register with external HLDMM, receive tasks) | authority ADR | — |
+| `TaskAck` → upstream `CommandAcknowledgment` propagation | peat-schema design | Bridge emits `TaskAcknowledged`; propagating it back up the Peat hierarchy requires a `CommandCoordinator` extension |
+| Direction B: Peat as DLMM (register with external HLDMM, receive tasks) | authority ADR | Reverse topology — Peat node acts as sensor rather than manager |
+| MGRS coordinate support | `transform/detection.rs` | Military Grid Reference System parsing not yet implemented |
 
 ---
 
@@ -294,15 +296,11 @@ distributed HLDMM**: SAPIENT DLMMs feed detection data up the Peat hierarchy as
 down from any authority level in the hierarchy and is translated into SAPIENT `Task`
 messages at the bridge.
 
-The most important design gap relative to Peat's intended model is the DIL task queue:
-without it, the bridge's SAPIENT sensors are unmanaged during Peat network partitions,
-which violates the pre-positioning / edge-autonomy principle that Peat was built for.
-Issue #15 closes that gap.
+Phase 4 closed the two most critical gaps: the DIL outbound task queue (issue #15)
+ensures that sensors remain tasked during Peat network partitions, and
+`TaskAck` → `SapientUpdate::TaskAcknowledged` closes the command feedback loop so
+the bridge knows whether each task was accepted or rejected.
 
-The second gap is the `TaskAck` → `CommandAcknowledgment` feedback path. Without it,
-the Peat hierarchy cannot track whether a command was accepted or rejected by the
-underlying sensor, breaking the audit and retry logic that `CommandCoordinator` depends
-on.
-
-Both gaps are Phase 4 work. Neither requires an architectural change — only
-implementation of the planned `start()` / `send_task()` methods.
+The remaining open item is propagating `TaskAcknowledged` back up the Peat hierarchy
+as a `CommandAcknowledgment`. The bridge emits the variant; consuming it requires a
+`CommandCoordinator` extension in a Peat-side PR, which is the natural next step.
