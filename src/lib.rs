@@ -40,6 +40,8 @@ pub mod error;
 pub mod proto;
 
 #[cfg(feature = "peat")]
+pub mod bridge;
+#[cfg(feature = "peat")]
 pub mod transform;
 
 pub use error::SapientError;
