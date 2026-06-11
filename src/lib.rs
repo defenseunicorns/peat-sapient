@@ -46,6 +46,8 @@ pub mod rate_limit;
 #[cfg(feature = "peat")]
 pub mod registry;
 #[cfg(feature = "peat")]
+pub mod task_queue;
+#[cfg(feature = "peat")]
 pub mod transform;
 #[cfg(feature = "peat")]
 pub mod watchdog;

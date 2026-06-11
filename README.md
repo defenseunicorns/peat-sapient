@@ -1,6 +1,6 @@
 # peat-sapient
 
-SAPIENT (BSI Flex 335 v2.0) protocol library and Peat mesh bridge.
+Sensor and Platform Integration Extended from NATO Technology (SAPIENT) — British Standards Institution (BSI) Flex 335 v2.0 — protocol library and Peat mesh bridge.
 
 Provides bidirectional integration between [SAPIENT](https://www.gov.uk/guidance/sapient-autonomous-sensor-system)
 sensor/autonomous-platform nodes and the [Peat](https://github.com/defenseunicorns/peat) mesh ecosystem.
@@ -18,7 +18,7 @@ sensor/autonomous-platform nodes and the [Peat](https://github.com/defenseunicor
 
 ## Quick start
 
-### DLMM mode — connect to an HLDMM and receive events
+### Detection-Level Multi-sensor Management Module (DLMM) mode — connect to a High-Level Decision Making Module (HLDMM) and receive events
 
 ```rust
 use std::net::SocketAddr;
@@ -106,7 +106,7 @@ while let Some(msg) = connection::recv(&mut framed).await? {
 
 | Layer | Feature flag | Contents | Peat dependency |
 |-------|-------------|----------|-----------------|
-| **1 — SAPIENT library** | always compiled | Proto types, TCP codec, connection management | None |
+| **1 — SAPIENT library** | always compiled | Proto types, Transmission Control Protocol (TCP) codec, connection management | None |
 | **2 — Peat bridge** | `peat` (default) | Message transforms, `SapientBridge`, `NodeRegistry`, rate limiter, watchdog | `peat-schema` |
 
 The two-layer design lets teams use `peat-sapient` as a general Rust SAPIENT library
@@ -124,7 +124,7 @@ produce `Ignored` rather than an error, so an unexpected message never panics th
 |---------|-------------|-----------|
 | `Registered` | `Registration` | `node_id`, `advertisement: CapabilityAdvertisement` |
 | `StatusUpdated` | `StatusReport` | `node_id`, `state: NodeState`, optional `capability_delta` |
-| `Detected` | `DetectionReport` | `node_id`, `track: Track` (WGS84 position, velocity, classification) |
+| `Detected` | `DetectionReport` | `node_id`, `track: Track` (World Geodetic System 1984 (WGS84) position, velocity, classification) |
 | `Alerted` | `Alert` | `node_id`, `event: SapientAlertEvent` (type, status, priority, position, attributes JSON) |
 | `NodeDisconnected` | Watchdog timeout | `node_id` — node already removed from `NodeRegistry` |
 | `Ignored` | Everything else | `reason: String` |
@@ -149,8 +149,14 @@ let config = BridgeConfig {
         burst_size: 20,
     }),
     // Nodes silent for 2 × this duration emit NodeDisconnected.
-    heartbeat_interval: Duration::from_secs(30), // SAPIENT ICD default
+    heartbeat_interval: Duration::from_secs(30), // SAPIENT Interface Control Document (ICD) default
+    // Max unacknowledged outbound tasks queued per DLMM node.
+    task_queue_depth: 32,
+    // Tasks older than this are discarded rather than replayed on reconnect.
+    task_ttl: Duration::from_secs(300),
 };
+let (bridge, mut updates) = SapientBridge::new(config);
+bridge.start().await?;
 ```
 
 ### Heartbeat watchdog
@@ -158,14 +164,13 @@ let config = BridgeConfig {
 The watchdog runs as an independent task and emits `NodeDisconnected` events over a channel:
 
 ```rust
-use peat_sapient::{bridge::SapientUpdate, registry::new_registry, watchdog::run_watchdog};
+use peat_sapient::{bridge::SapientUpdate, watchdog::run_watchdog};
 use tokio::sync::mpsc;
 use std::time::Duration;
 
-let registry = new_registry();
-let (tx, mut rx) = mpsc::channel(64);
-
-tokio::spawn(run_watchdog(registry.clone(), Duration::from_secs(30), tx));
+// bridge is a SapientBridge returned from SapientBridge::new()
+let (wd_tx, mut wd_rx) = mpsc::channel(64);
+tokio::spawn(run_watchdog(bridge.registry(), Duration::from_secs(30), wd_tx));
 
 while let Some(event) = rx.recv().await {
     if let SapientUpdate::NodeDisconnected { node_id } = event {
@@ -209,10 +214,10 @@ let policy = ReconnectConfig {
 
 | System | Support | Notes |
 |--------|---------|-------|
-| WGS84 LatLng (`LatLngDegM`) | Full | `x` = longitude °, `y` = latitude °, `z` = altitude m |
-| UTM | Full | Snyder series inverse projection → WGS84. Grid zone parsed from `coordinate_system`. |
+| World Geodetic System 1984 (WGS84) LatLng (`LatLngDegM`) | Full | `x` = longitude °, `y` = latitude °, `z` = altitude m |
+| Universal Transverse Mercator (UTM) | Full | Snyder series inverse projection → WGS84. Grid zone parsed from `coordinate_system`. |
 | Range/bearing (`RangeBearing`) | Requires sensor position | Pass the sensor's `last_position` from `NodeRegistry`; returns `UnsupportedCoordinateSystem` if absent. |
-| MGRS | Not supported | Planned — tracked in `detection.rs`. |
+| Military Grid Reference System (MGRS) | Not supported | Planned — tracked in `detection.rs`. |
 
 ---
 
@@ -228,9 +233,9 @@ let task_msg = to_task(&hldmm_node_id, &sensor_node_id, &command)?;
 connection::send(&mut framed, task_msg).await?;
 ```
 
-`to_task` generates a ULID task ID (BSI Flex 335 v2.0 §task_id) and sets `Control::Start`.
-A higher-level `send_task()` method with DIL queuing and acknowledgement tracking is
-planned in Phase 4 (see [docs/PLAN.md](docs/PLAN.md)).
+`to_task` generates a Universally Unique Lexicographically Sortable Identifier (ULID) task ID (BSI Flex 335 v2.0 §task_id) and sets `Control::Start`.
+
+Use `SapientBridge::send_task()` for Disconnected, Intermittent, and Low-bandwidth (DIL)-aware delivery: tasks are queued per-node, replayed on reconnect, and dequeued when `TaskAck::Accepted` is received. See [`BridgeConfig`](#bridgeconfig) for queue depth and time-to-live (TTL) settings.
 
 ---
 
@@ -255,9 +260,10 @@ the full integration suite.
 | Document | Contents |
 |----------|---------|
 | [docs/PLAN.md](docs/PLAN.md) | Phase-by-phase implementation plan and current status |
+| [docs/c2-collaboration.md](docs/c2-collaboration.md) | Peat ↔ SAPIENT Command and Control (C2) collaboration model; design tensions; what is and is not implemented |
 | [docs/compliance.md](docs/compliance.md) | BSI Flex 335 v2 test harness (manual compliance gate) |
 | [docs/developer-guide.md](docs/developer-guide.md) | Architecture, transforms, contributing |
-| [ADR-070](https://github.com/defenseunicorns/peat/blob/main/docs/adr/070-sapient-protocol-bridge.md) | Architecture decision record |
+| [Architecture Decision Record (ADR) 070](https://github.com/defenseunicorns/peat/blob/main/docs/adr/070-sapient-protocol-bridge.md) | ADR: SAPIENT protocol bridge design |
 
 ---
 

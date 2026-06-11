@@ -138,20 +138,22 @@ Task ID generated as ULID (BSI Flex 335 v2.0 §task_id).
 
 ---
 
-## Phase 4 — Bridge API & integration tests 🔄
+## Phase 4 — Bridge API & integration tests ✅
 
 **Goal:** `SapientBridge` functional end-to-end against Apex as the SAPIENT counterpart.
 
 ### Tasks
 
-- [x] `SapientBridge::new()` — instantiates config + rate limiter
+- [x] `SapientBridge::new()` — instantiates config + rate limiter; returns `(Self, mpsc::Receiver<SapientUpdate>)`
 - [x] `route_message()` — routes inbound content to `SapientUpdate` variants
 - [x] Detection rate limiter — token bucket, configurable per-node (`rate_limit.rs`)
 - [x] Heartbeat watchdog — emits `NodeDisconnected` after `2 × heartbeat_interval` (`watchdog.rs`)
 - [x] Integration test harness — `tests/integration/` with Apex skip guard (feature `integration-tests`)
-- [ ] `SapientBridge::start()` — spawn TCP listener/connector + routing task loop
-- [ ] `SapientBridge::send_task()` — enqueue outbound task; observe ack via channel
-- [ ] DIL outbound task queue — replay pending tasks on DLMM reconnect (#15)
+- [x] `SapientBridge::start()` — HLDMM TCP listener + per-connection routing task loop
+- [x] `SapientBridge::send_task()` — enqueue outbound task; send immediately if connected
+- [x] DIL outbound task queue — per-node `TaskQueue`; replay on reconnect; TTL expiry with warn (#15)
+- [x] `TaskAck` → `SapientUpdate::TaskAcknowledged` — closes command feedback loop; dequeues acked task
+- [x] `SapientBridge::registry()` — exposes `NodeRegistry` Arc for watchdog integration
 
 ### Integration tests (`--features integration-tests,peat`)
 
@@ -183,5 +185,5 @@ See `docs/compliance.md` for the full procedure.
 | 1 | Proto bindings | No | Yes | ✅ Done |
 | 2 | TCP codec + connection | No | Yes | ✅ Done |
 | 3 | Message mapping | Yes (`peat` feature) | Yes | ✅ Done |
-| 4 | Bridge API + integration tests | Yes | Yes | 🔄 In progress |
+| 4 | Bridge API + integration tests | Yes | Yes | ✅ Done |
 | 5 | Formal compliance | — | Manual | ⏳ Pending Phase 4 |

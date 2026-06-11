@@ -14,5 +14,6 @@
 //! - `outbound_flow` — peat-sapient sends Tasks; two loopback tests do not require Apex
 
 mod apex_harness;
+mod bridge_lifecycle;
 mod inbound_flow;
 mod outbound_flow;
