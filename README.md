@@ -7,6 +7,7 @@ sensor/autonomous-platform nodes and the [Peat](https://github.com/defenseunicor
 
 - [Quick start](#quick-start)
 - [Two layers](#two-layers)
+- [SAPIENT ↔ CoT via peat-mesh](#sapient--cot-via-peat-mesh)
 - [Event model — SapientUpdate](#event-model--sapientupdate)
 - [Configuration](#configuration)
 - [Coordinate systems](#coordinate-systems)
@@ -111,6 +112,21 @@ while let Some(msg) = connection::recv(&mut framed).await? {
 
 The two-layer design lets teams use `peat-sapient` as a general Rust SAPIENT library
 independent of the broader Peat ecosystem.
+
+## SAPIENT ↔ CoT via peat-mesh
+
+This repo is a two-crate Cargo workspace. Alongside `peat-sapient` (above), the
+`peat-mesh-sapient` crate implements `peat_mesh::transport::Translator`/`Transport`
+so SAPIENT `DetectionReport`/`Registration`/`StatusReport` data reaches CoT/ATAK
+consumers (or any other `peat-mesh`-connected node) via the mesh's CRDT sync —
+without merging SAPIENT and CoT handling into one crate. It depends on both
+`peat-mesh` and `peat-sapient` (via the `translator-codec` feature) one-way;
+`peat-sapient` itself keeps zero `peat-mesh` dependency, per
+[ADR-059 Amendment 4](https://github.com/defenseunicorns/peat/blob/main/docs/adr/059-cross-transport-document-bridging.md).
+
+v1 scope is telemetry only (`tracks`/`platforms`) — tasking (`Task`/`TaskAck`)
+stays on `SapientBridge`/`TaskQueue`. See `docs/PLAN.md` Phase 6 for the full
+design and rationale.
 
 ---
 
@@ -246,11 +262,15 @@ Use `SapientBridge::send_task()` for Disconnected, Intermittent, and Low-bandwid
 
 ```sh
 # Unit + codec + connection tests — no external tools required
-cargo test --features peat
+cargo test -p peat-sapient --features peat
 
 # Integration tests against the Dstl Apex SAPIENT middleware
 # Two loopback tests always run; Apex-dependent tests skip if apex.py is absent.
-cargo test --features integration-tests,peat --test integration
+cargo test -p peat-sapient --features integration-tests,peat --test integration
+
+# peat-mesh-sapient — Translator/Transport adapter, plus a real end-to-end
+# test against an in-memory peat-mesh Node (tests/hldmm_integration.rs)
+cargo test -p peat-mesh-sapient
 ```
 
 See [docs/developer-guide.md](docs/developer-guide.md) for how to install Apex and run
