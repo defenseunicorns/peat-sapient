@@ -57,6 +57,42 @@ pub fn track_to_fields(track: &Track) -> (String, Map<String, Value>) {
     (track.track_id.clone(), fields)
 }
 
+/// Stable wire string for `OperationalStatus` — deliberately not `{:?}`.
+/// `Debug` output on a prost-generated enum isn't a stable contract: a
+/// `.proto` variant rename in `peat-schema` would silently change what
+/// lands in the mesh `Document`, with no compile error to catch it.
+fn operational_status_str(status: OperationalStatus) -> &'static str {
+    match status {
+        OperationalStatus::Unspecified => "unspecified",
+        OperationalStatus::Ready => "ready",
+        OperationalStatus::Active => "active",
+        OperationalStatus::Degraded => "degraded",
+        OperationalStatus::Offline => "offline",
+        OperationalStatus::Maintenance => "maintenance",
+    }
+}
+
+/// Stable wire string for `HealthStatus` — see [`operational_status_str`].
+fn health_status_str(health: HealthStatus) -> &'static str {
+    match health {
+        HealthStatus::Unspecified => "unspecified",
+        HealthStatus::Nominal => "nominal",
+        HealthStatus::Degraded => "degraded",
+        HealthStatus::Critical => "critical",
+        HealthStatus::Failed => "failed",
+    }
+}
+
+/// Stable wire string for `Phase` — see [`operational_status_str`].
+fn phase_str(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Unspecified => "unspecified",
+        Phase::Discovery => "discovery",
+        Phase::Cell => "cell",
+        Phase::Hierarchy => "hierarchy",
+    }
+}
+
 /// Project a `CapabilityAdvertisement` (from
 /// [`crate::transform::registration::from_registration`]) and an optional
 /// `NodeState` delta (from [`crate::transform::status`]) into the flat field
@@ -86,16 +122,25 @@ pub fn platform_to_fields(
 
     let operational_status = OperationalStatus::try_from(advertisement.operational_status)
         .unwrap_or(OperationalStatus::Unspecified);
-    fields.insert(
-        "operational_status".into(),
-        json!(format!("{operational_status:?}")),
-    );
+    // Omit rather than write "Unspecified": a StatusReport with no FOV/mode
+    // change carries `capability_delta = None` (transform::status), so the
+    // caller synthesizes an empty CapabilityAdvertisement here — writing
+    // "Unspecified" unconditionally would let every such heartbeat clobber
+    // a real Ready/Degraded/Offline value a prior Registration set, under
+    // peat-mesh's field-level LWW merge. Same "empty means absent" treatment
+    // `capabilities` already gets above.
+    if operational_status != OperationalStatus::Unspecified {
+        fields.insert(
+            "operational_status".into(),
+            json!(operational_status_str(operational_status)),
+        );
+    }
 
     if let Some(state) = state {
         let health = HealthStatus::try_from(state.health).unwrap_or(HealthStatus::Unspecified);
         let phase = Phase::try_from(state.phase).unwrap_or(Phase::Unspecified);
-        fields.insert("health".into(), json!(format!("{health:?}")));
-        fields.insert("phase".into(), json!(format!("{phase:?}")));
+        fields.insert("health".into(), json!(health_status_str(health)));
+        fields.insert("phase".into(), json!(phase_str(phase)));
 
         if let Some(pos) = &state.position {
             fields.insert("lat".into(), json!(pos.latitude));
@@ -206,11 +251,30 @@ mod tests {
         let (id, fields) = platform_to_fields(&advertisement, Some(&state));
         assert_eq!(id, "node-9");
         assert_eq!(fields["capabilities"], json!(["radar"]));
-        assert_eq!(fields["operational_status"], json!("Ready"));
-        assert_eq!(fields["health"], json!("Nominal"));
-        assert_eq!(fields["phase"], json!("Hierarchy"));
+        assert_eq!(fields["operational_status"], json!("ready"));
+        assert_eq!(fields["health"], json!("nominal"));
+        assert_eq!(fields["phase"], json!("hierarchy"));
         assert_eq!(fields["lat"], json!(1.0));
         assert!(fields.get("hae").is_none(), "zero altitude omitted");
+    }
+
+    /// The bug the QA review caught: a heartbeat StatusReport with no
+    /// FOV/mode change carries an empty, synthesized `CapabilityAdvertisement`
+    /// (`operational_status = Unspecified`). Writing that unconditionally
+    /// would let every heartbeat clobber a real Ready/Degraded/Offline value
+    /// a prior Registration set, under peat-mesh's field-level LWW merge.
+    #[test]
+    fn platform_to_fields_omits_unspecified_operational_status() {
+        let advertisement = CapabilityAdvertisement {
+            node_id: "node-11".into(),
+            operational_status: OperationalStatus::Unspecified as i32,
+            ..Default::default()
+        };
+        let (_, fields) = platform_to_fields(&advertisement, None);
+        assert!(
+            fields.get("operational_status").is_none(),
+            "Unspecified must be omitted, not written, so it can't clobber a prior known status"
+        );
     }
 
     #[test]

@@ -445,3 +445,102 @@ impl Transport for PeatSapientTransport {
         self.is_connected(peer_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peat_mesh::sync::InMemoryBackend;
+
+    /// Register-then-disconnect without a real TCP connection: uses the
+    /// crate-private `register_peer` directly (same shape `start()`'s
+    /// accept/connect loops use) since `disconnect()`'s event emission and
+    /// `subscribe_peer_events`' fan-out don't depend on the wire — only on
+    /// the peer bookkeeping, which is what this test exercises. No
+    /// end-to-end test covered this path (`hldmm_integration.rs` and
+    /// `dlmm_integration.rs` only exercise the happy-path connect+receive).
+    fn make_transport() -> PeatSapientTransport {
+        let backend: Arc<dyn peat_mesh::sync::DataSyncBackend> =
+            Arc::new(InMemoryBackend::new_initialized());
+        let node = Arc::new(MeshNode::new(backend));
+        let translator = Arc::new(SapientTranslator::new());
+        PeatSapientTransport::new(
+            SapientRole::Hldmm {
+                listen_addr: "127.0.0.1:0".parse().unwrap(),
+            },
+            node,
+            translator,
+        )
+    }
+
+    #[tokio::test]
+    async fn disconnect_emits_disconnected_event() {
+        let transport = make_transport();
+        let mut events = transport.subscribe_peer_events();
+
+        let peer_id = NodeId::from("peer-1");
+        PeatSapientTransport::register_peer(
+            &transport.peers,
+            &transport.event_senders,
+            peer_id.clone(),
+            Instant::now(),
+            Arc::new(AtomicBool::new(true)),
+            tokio::spawn(async {}),
+        );
+        // Drain the Connected event register_peer emits so it isn't
+        // mistaken for the Disconnected event under test.
+        assert!(matches!(
+            events.recv().await,
+            Some(PeerEvent::Connected { .. })
+        ));
+
+        transport.disconnect(&peer_id).await.expect("disconnect");
+
+        match events.recv().await {
+            Some(PeerEvent::Disconnected {
+                peer_id: disconnected_id,
+                reason,
+                ..
+            }) => {
+                assert_eq!(disconnected_id, peer_id);
+                assert!(matches!(reason, DisconnectReason::LocalClosed));
+            }
+            other => panic!("expected Disconnected event, got {other:?}"),
+        }
+
+        assert_eq!(
+            transport.peer_count(),
+            0,
+            "disconnect must remove the peer record"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_unknown_peer_errors() {
+        let transport = make_transport();
+        let result = transport.disconnect(&NodeId::from("never-connected")).await;
+        assert!(matches!(result, Err(TransportError::PeerNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn subscribe_peer_events_fans_out_to_multiple_subscribers() {
+        let transport = make_transport();
+        let mut first = transport.subscribe_peer_events();
+        let mut second = transport.subscribe_peer_events();
+
+        PeatSapientTransport::register_peer(
+            &transport.peers,
+            &transport.event_senders,
+            NodeId::from("peer-2"),
+            Instant::now(),
+            Arc::new(AtomicBool::new(true)),
+            tokio::spawn(async {}),
+        );
+
+        for events in [&mut first, &mut second] {
+            assert!(
+                matches!(events.recv().await, Some(PeerEvent::Connected { .. })),
+                "every subscriber must independently receive the event"
+            );
+        }
+    }
+}
