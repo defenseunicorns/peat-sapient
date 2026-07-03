@@ -136,7 +136,6 @@ fn sapient_registration_msg() -> SapientMessage {
             node_definition: vec![NodeDefinition {
                 node_type: Some(NodeType::Radar as i32),
                 node_sub_type: vec!["ground-radar".into()],
-                ..Default::default()
             }],
             ..Default::default()
         })),
