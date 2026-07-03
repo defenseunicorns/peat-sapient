@@ -15,7 +15,7 @@ use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::{
 use peat_sapient::proto::{Content, DetectionReport, Registration, SapientMessage, StatusReport};
 use peat_sapient::transform::{detection, registration, status};
 use peat_schema::capability::v1::{
-    Capability, CapabilityType, CapabilityAdvertisement, OperationalStatus,
+    Capability, CapabilityAdvertisement, CapabilityType, OperationalStatus,
 };
 use peat_schema::common::v1::{Position, Timestamp};
 use peat_schema::node::v1::{HealthStatus, NodeState, Phase};
@@ -225,8 +225,7 @@ fn bench_registration_pipeline(c: &mut Criterion) {
         "pipeline: Registration → CapabilityAdvertisement → fields",
         |b| {
             b.iter(|| {
-                let adv =
-                    registration::from_registration(black_box(node_id), black_box(reg));
+                let adv = registration::from_registration(black_box(node_id), black_box(reg));
                 platform_to_fields(black_box(&adv), None)
             })
         },
@@ -242,8 +241,7 @@ fn bench_status_pipeline(c: &mut Criterion) {
     let node_id = msg.node_id.as_deref().unwrap();
     c.bench_function("pipeline: StatusReport → NodeState → fields", |b| {
         b.iter(|| {
-            let (state, cap_delta) =
-                status::from_status_report(black_box(node_id), black_box(sr));
+            let (state, cap_delta) = status::from_status_report(black_box(node_id), black_box(sr));
             let adv = cap_delta.unwrap_or(CapabilityAdvertisement {
                 node_id: node_id.to_string(),
                 ..Default::default()
