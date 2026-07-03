@@ -124,7 +124,10 @@ async fn bridge_delivers_task_to_connected_dlmm() {
 
     // HLDMM sends a task.
     let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
-    bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, None)
+        .await
+        .unwrap();
 
     // DLMM should receive the Task.
     let received = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm))
@@ -148,7 +151,10 @@ async fn bridge_replays_queued_task_on_dlmm_connect() {
 
     // Enqueue a task BEFORE the DLMM connects.
     let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
-    bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, None)
+        .await
+        .unwrap();
 
     // Now the DLMM connects and registers.
     let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
@@ -204,7 +210,10 @@ async fn task_ack_prevents_replay_on_reconnect() {
             Some(Content::Task(t)) => t.task_id.clone().unwrap(),
             _ => panic!("expected Task content"),
         };
-        bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+        bridge
+            .send_task("dlmm-test-uuid", task_msg, None)
+            .await
+            .unwrap();
 
         // DLMM receives Task.
         let received = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm))
@@ -266,7 +275,10 @@ async fn expired_task_is_not_replayed_on_reconnect() {
 
     // Enqueue task before DLMM connects.
     let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
-    bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, None)
+        .await
+        .unwrap();
 
     // Advance time past the TTL.
     tokio::time::advance(Duration::from_secs(6)).await;
@@ -290,4 +302,78 @@ async fn expired_task_is_not_replayed_on_reconnect() {
         timeout_result.is_err(),
         "expired task should not be replayed"
     );
+}
+
+/// When `send_task` is called with a `command_id`, the resulting
+/// `TaskAcknowledged` carries that `command_id` for upstream correlation.
+#[tokio::test]
+async fn task_ack_carries_command_id() {
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
+
+    let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+
+    connection::send(&mut dlmm, registration_msg("dlmm-test-uuid"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered
+
+    let cmd = isr_command();
+    let command_id = cmd.command_id.clone();
+    let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &cmd).unwrap();
+    let task_id = match &task_msg.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("expected Task content"),
+    };
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, Some(command_id.clone()))
+        .await
+        .unwrap();
+
+    // DLMM receives Task.
+    tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // DLMM sends TaskAck.
+    connection::send(
+        &mut dlmm,
+        SapientMessage {
+            node_id: Some("dlmm-test-uuid".into()),
+            content: Some(Content::TaskAck(TaskAck {
+                task_id: Some(task_id),
+                task_status: Some(task_ack::TaskStatus::Accepted as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Bridge should emit TaskAcknowledged with our command_id.
+    let update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+    if let SapientUpdate::TaskAcknowledged {
+        command_id: recv_cmd_id,
+        ..
+    } = update
+    {
+        assert_eq!(
+            recv_cmd_id.as_deref(),
+            Some(command_id.as_str()),
+            "TaskAcknowledged should carry the originating command_id"
+        );
+    } else {
+        panic!("expected TaskAcknowledged, got {update:?}");
+    }
 }
