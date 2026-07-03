@@ -194,15 +194,19 @@ impl SapientBridge {
     /// Start the bridge in HLDMM mode: bind `config.addr` and accept incoming
     /// DLMM connections. Each connection is handled in a dedicated tokio task.
     ///
-    /// Returns immediately after spawning the accept loop. Returns `Err` if the
-    /// TCP bind fails (e.g. address already in use).
-    pub async fn start(&self) -> Result<(), SapientError> {
+    /// Returns the actual bound address after spawning the accept loop. When
+    /// `config.addr` uses port `0`, the OS assigns an ephemeral port — use
+    /// the returned address to connect. Returns `Err` if the TCP bind fails.
+    pub async fn start(&self) -> Result<std::net::SocketAddr, SapientError> {
         let listener = TcpListener::bind(self.inner.config.addr)
             .await
             .map_err(|e| {
                 SapientError::ConnectionFailed(format!("bind {}: {e}", self.inner.config.addr))
             })?;
-        info!(addr = %self.inner.config.addr, "SAPIENT HLDMM listening");
+        let bound_addr = listener
+            .local_addr()
+            .map_err(|e| SapientError::ConnectionFailed(format!("local_addr: {e}")))?;
+        info!(addr = %bound_addr, "SAPIENT HLDMM listening");
 
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
@@ -218,7 +222,7 @@ impl SapientBridge {
             }
         });
 
-        Ok(())
+        Ok(bound_addr)
     }
 
     /// Enqueue a `SapientMessage` carrying a `Task` for delivery to `node_id`.
