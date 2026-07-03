@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use peat_sapient::{
-    bridge::{route_message, SapientUpdate},
+    bridge::{route_message, SapientUpdate, TaskAckStatus},
     connection::{self, ReconnectConfig},
     proto::sapient_msg::bsi_flex_335_v2_0::{task_ack, Registration, SapientMessage, TaskAck},
     transform::task::to_task,
@@ -123,9 +123,12 @@ async fn task_sent_and_task_ack_received_loopback() {
     assert!(
         matches!(
             update,
-            SapientUpdate::TaskAcknowledged { accepted: true, .. }
+            SapientUpdate::TaskAcknowledged {
+                status: TaskAckStatus::Accepted,
+                ..
+            }
         ),
-        "TaskAck should route to TaskAcknowledged(accepted=true), got {update:?}"
+        "TaskAck should route to TaskAcknowledged(Accepted), got {update:?}"
     );
 
     // Verify the DLMM side received a well-formed Task
