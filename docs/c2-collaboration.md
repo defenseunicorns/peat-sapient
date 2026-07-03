@@ -273,14 +273,14 @@ requires knowing:
 | `SapientBridge::start()` — HLDMM TCP listener + per-connection routing | `bridge.rs` |
 | `SapientBridge::send_task()` — enqueue + deliver; DIL replay on reconnect | `bridge.rs` |
 | DIL outbound task queue — per-node, TTL expiry, replay on reconnect | `task_queue.rs` |
-| `TaskAck` → `SapientUpdate::TaskAcknowledged` — closes command feedback loop | `bridge.rs` |
+| `TaskAck` → `SapientUpdate::TaskAcknowledged` — full status enum + `command_id` correlation | `bridge.rs` |
 | Integration test harness (Apex SAPIENT Middleware skip guard) | `tests/integration/` |
 
 ### Not Yet Implemented
 
 | Capability | Blocking on | Notes |
 |-----------|------------|-------|
-| `TaskAck` → upstream `CommandAcknowledgment` propagation | peat-schema design | Bridge emits `TaskAcknowledged`; propagating it back up the Peat hierarchy requires a `CommandCoordinator` extension |
+| `TaskAck` → upstream `CommandAcknowledgment` propagation | peat-node/peat-mesh runtime | Bridge emits `TaskAcknowledged` with `command_id` correlation; propagating it up the Peat hierarchy requires a `CommandCoordinator` runtime that accepts `CommandAcknowledgment` and routes it upward |
 | Direction B: Peat as DLMM (register with external HLDMM, receive tasks) | authority ADR | Reverse topology — Peat node acts as sensor rather than manager |
 
 ---
@@ -301,5 +301,9 @@ ensures sensors remain tasked during Peat network partitions, and
 the bridge knows whether each task was accepted or rejected.
 
 The remaining open item is propagating `TaskAcknowledged` back up the Peat hierarchy
-as a `CommandAcknowledgment`. The bridge emits the variant; consuming it requires a
-`CommandCoordinator` extension in a Peat-side PR, which is the natural next step.
+as a `CommandAcknowledgment`. The bridge now emits `TaskAcknowledged` with the full
+`TaskAckStatus` enum (Accepted/Rejected/Completed/Failed) and the originating
+`command_id` from `send_task`, so the correlation is in place. Consuming it requires a
+`CommandCoordinator` runtime in peat-node or peat-mesh that accepts
+`CommandAcknowledgment` messages and propagates them upward, which is the natural next
+step.
