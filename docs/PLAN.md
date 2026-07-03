@@ -2,13 +2,26 @@
 
 **ADR**: [ADR-070](https://github.com/defenseunicorns/peat/blob/main/docs/adr/070-sapient-protocol-bridge.md)  
 **Status**: Active  
-**Last updated**: 2026-06-11
+**Last updated**: 2026-07-03
 
 ---
 
-## Crate architecture
+## Repo structure
 
-`peat-sapient` has two logical layers, separated by a feature flag:
+Since Phase 6, this repo is a two-crate Cargo workspace:
+
+```
+peat-sapient/                (workspace root)
+├── peat-sapient/            # the library described below — Layers 1 & 2, plus
+│                            # the translator-codec feature (Phase 6)
+└── peat-mesh-sapient/       # peat_mesh::transport::Translator/Transport adapter
+                             # (ADR-059 Amendment 4 one-way adapter crate — see
+                             # Phase 6 below for why it isn't inside peat-sapient)
+```
+
+## Crate architecture (`peat-sapient`)
+
+`peat-sapient` has three logical layers, separated by feature flags:
 
 ```
 peat-sapient
@@ -19,17 +32,21 @@ peat-sapient
 │   ├── src/proto/      prost-generated types (re-exported)
 │   └── src/error.rs    SapientError
 │
-└── Layer 2: Peat transformer              (feature = "peat"; adds peat-schema dep)
-    ├── src/transform/
-    │   ├── registration.rs   Registration → peat_schema::CapabilityAdvertisement
-    │   ├── status.rs         StatusReport → NodeState + CapabilityAdvertisement delta
-    │   ├── detection.rs      DetectionReport → Track  (+ coord conversion)
-    │   ├── alert.rs          Alert → SapientAlertEvent
-    │   └── task.rs           HierarchicalCommand → Task (outbound)
-    ├── src/bridge.rs     SapientBridge — routes inbound messages, applies rate limiting
-    ├── src/registry.rs   NodeRegistry — per-connection sensor state (Arc<RwLock<_>>)
-    ├── src/rate_limit.rs DetectionLimiter — per-node token-bucket rate limiter
-    └── src/watchdog.rs   run_watchdog — heartbeat-timeout background task
+├── Layer 2: Peat transformer              (feature = "peat"; adds peat-schema dep)
+│   ├── src/transform/
+│   │   ├── registration.rs   Registration → peat_schema::CapabilityAdvertisement
+│   │   ├── status.rs         StatusReport → NodeState + CapabilityAdvertisement delta
+│   │   ├── detection.rs      DetectionReport → Track  (+ coord conversion)
+│   │   ├── alert.rs          Alert → SapientAlertEvent
+│   │   └── task.rs           HierarchicalCommand → Task (outbound)
+│   ├── src/bridge.rs     SapientBridge — routes inbound messages, applies rate limiting
+│   ├── src/registry.rs   NodeRegistry — per-connection sensor state (Arc<RwLock<_>>)
+│   ├── src/rate_limit.rs DetectionLimiter — per-node token-bucket rate limiter
+│   └── src/watchdog.rs   run_watchdog — heartbeat-timeout background task
+│
+└── translator-codec feature (Phase 6)     (feature = "translator-codec"; implies "peat")
+    └── src/mesh_fields.rs   peat_schema struct ↔ flat JSON, for peat-mesh-sapient's
+                             Translator impl — still zero peat-mesh dependency
 ```
 
 **Layer 1** is a general-purpose Rust SAPIENT library — the first such crate. Useful standalone
@@ -178,6 +195,68 @@ See `docs/compliance.md` for the full procedure.
 
 ---
 
+## Phase 6 — SAPIENT ↔ CoT via peat-mesh Translator (v1: telemetry only) ✅
+
+**Goal:** SAPIENT `DetectionReport`/`Registration`/`StatusReport` reach CoT/ATAK
+consumers (and other mesh nodes) via `peat-mesh`'s `Translator`/`Document`
+mechanism (ADR-059), without merging SAPIENT and CoT handling into one crate
+(ADR-070 already rejected that) and without a hand-rolled gateway shuttling
+between `SapientBridge` and `peat-tak-bridge`.
+
+Per ADR-059 **Amendment 4** (peat repo): SAPIENT is an application-domain-specific
+transport (like TAK, unlike BLE), so its `Translator` impl lives in a
+**one-way adapter crate**, not behind a `mesh-translator` back-edge feature
+inside `peat-sapient` itself (the pattern `CotTranslator` currently uses,
+which the amendment deprecates). Kept in-repo as a workspace member rather
+than a new repo, since the adapter crate has no existence outside wrapping
+`peat-sapient`.
+
+### Repo restructuring
+
+`peat-sapient` became a two-crate Cargo workspace:
+
+```
+peat-sapient/                    (workspace root)
+├── peat-sapient/                # the library — STILL zero peat-mesh dependency
+│   └── src/mesh_fields.rs       # flat-JSON projection (translator-codec feature)
+└── peat-mesh-sapient/           # NEW — depends on peat-mesh + peat-sapient, one-way
+    └── src/
+        ├── translator.rs        # impl Translator for SapientTranslator
+        └── transport.rs         # impl MeshTransport/Transport for PeatSapientTransport
+```
+
+### Scope (v1)
+
+| SAPIENT message | Mesh collection | Direction |
+|---|---|---|
+| `DetectionReport` | `tracks` | SAPIENT → mesh only |
+| `Registration` / `StatusReport` | `platforms` | SAPIENT → mesh only |
+| `Task` / `TaskAck` | *(none — stays on `SapientBridge`/`TaskQueue`)* | out of scope |
+
+`SapientTranslator::encode_outbound` always declines: SAPIENT has no wire
+message for "manager pushes a track/status to a sensor." Tasking is
+ack-correlated and ordered — it stays on `peat-sapient`'s existing stateful
+bridge path rather than being flattened into the eventually-consistent
+`Document`/CRDT model. See `docs/c2-collaboration.md`'s still-open
+`CommandAcknowledgment`/`CommandCoordinator` gap for where real tasking
+interop would go.
+
+`platforms` has no CoT-side consumer yet (`CotTranslator` in the `peat` repo
+only carries `tracks` today) — its correctness bar here is "lands in the
+mesh with the right `Document` shape, proven by tests," not "visible in
+ATAK." Extending `CotTranslator` to carry `platforms` is a tracked follow-up
+in the `peat` repo.
+
+### Tests
+
+- `peat-sapient/src/mesh_fields.rs` — unit tests for both projection functions.
+- `peat-mesh-sapient/src/translator.rs` — unit tests for `decode_inbound`/`encode_outbound`.
+- `peat-mesh-sapient/tests/hldmm_integration.rs` — real `peat_mesh::Node` (in-memory backend) + a fake DLMM over loopback TCP; proves the codec is wired correctly end-to-end, not just unit-tested in isolation.
+
+**Gate:** `cargo test --workspace` — 157 tests passing across both crates.
+
+---
+
 ## Phase summary
 
 | Phase | Scope | Peat dep? | CI? | Status |
@@ -187,3 +266,4 @@ See `docs/compliance.md` for the full procedure.
 | 3 | Message mapping | Yes (`peat` feature) | Yes | ✅ Done |
 | 4 | Bridge API + integration tests | Yes | Yes | ✅ Done |
 | 5 | Formal compliance | — | Manual | ⏳ Pending Phase 4 |
+| 6 | SAPIENT ↔ CoT via peat-mesh Translator (v1: tracks/platforms) | Yes (`peat-mesh-sapient`) | Yes | ✅ Done |
