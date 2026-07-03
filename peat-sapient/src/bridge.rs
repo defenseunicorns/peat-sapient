@@ -22,13 +22,70 @@ use crate::{
     codec::SapientCodec,
     error::SapientError,
     proto::sapient_msg::bsi_flex_335_v2_0::{
-        sapient_message::Content, task_ack, RegistrationAck, SapientMessage,
+        sapient_message::Content, task_ack, AlertAck as ProtoAlertAck, RegistrationAck,
+        SapientMessage,
     },
     rate_limit::{DetectionLimiter, RateLimitConfig},
     registry::{get_position, new_registry, remove, upsert, NodeRegistry},
     task_queue::TaskQueue,
     transform::{alert, alert::SapientAlertEvent, detection, registration, status},
 };
+
+/// Status reported by a DLMM in a `TaskAck`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskAckStatus {
+    Accepted,
+    Rejected,
+    Completed,
+    Failed,
+}
+
+impl TaskAckStatus {
+    fn from_proto(status: Option<i32>) -> Self {
+        status
+            .and_then(|s| task_ack::TaskStatus::try_from(s).ok())
+            .map(|s| match s {
+                task_ack::TaskStatus::Accepted => Self::Accepted,
+                task_ack::TaskStatus::Rejected => Self::Rejected,
+                task_ack::TaskStatus::Completed => Self::Completed,
+                task_ack::TaskStatus::Failed => Self::Failed,
+                task_ack::TaskStatus::Unspecified => Self::Failed,
+            })
+            .unwrap_or(Self::Failed)
+    }
+}
+
+/// Status reported in an `AlertAck`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertAckStatus {
+    Accepted,
+    Rejected,
+    Cancelled,
+}
+
+impl AlertAckStatus {
+    fn from_proto(status: Option<i32>) -> Self {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::alert_ack;
+        status
+            .and_then(|s| alert_ack::AlertAckStatus::try_from(s).ok())
+            .map(|s| match s {
+                alert_ack::AlertAckStatus::Accepted => Self::Accepted,
+                alert_ack::AlertAckStatus::Rejected => Self::Rejected,
+                alert_ack::AlertAckStatus::Cancelled => Self::Cancelled,
+                alert_ack::AlertAckStatus::Unspecified => Self::Rejected,
+            })
+            .unwrap_or(Self::Rejected)
+    }
+
+    fn to_proto(self) -> i32 {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::alert_ack;
+        match self {
+            Self::Accepted => alert_ack::AlertAckStatus::Accepted as i32,
+            Self::Rejected => alert_ack::AlertAckStatus::Rejected as i32,
+            Self::Cancelled => alert_ack::AlertAckStatus::Cancelled as i32,
+        }
+    }
+}
 
 /// A bridge update produced by routing one inbound SAPIENT message.
 #[derive(Debug)]
@@ -52,13 +109,18 @@ pub enum SapientUpdate {
         node_id: String,
         event: SapientAlertEvent,
     },
+    /// A node acknowledged a previously-sent alert.
+    AlertAcknowledged {
+        node_id: String,
+        alert_id: String,
+        status: AlertAckStatus,
+        reasons: Vec<String>,
+    },
     /// A DLMM acknowledged a task sent by the bridge.
     TaskAcknowledged {
         node_id: String,
         task_id: String,
-        /// `true` if `TaskAck::Accepted`, `false` if rejected, failed, or unknown.
-        accepted: bool,
-        /// Reasons provided by the DLMM (empty when accepted).
+        status: TaskAckStatus,
         reasons: Vec<String>,
     },
     /// Message was received but has no peat mapping (e.g. `RegistrationAck`, `Error`).
@@ -187,6 +249,38 @@ impl SapientBridge {
         Ok(())
     }
 
+    /// Send an `AlertAck` to a connected DLMM.
+    ///
+    /// Unlike `send_task`, alert acknowledgements are not queued for DIL
+    /// replay. Returns `Err(NodeNotFound)` if the node is not connected.
+    pub async fn send_alert_ack(
+        &self,
+        node_id: &str,
+        alert_id: &str,
+        status: AlertAckStatus,
+        reasons: Vec<String>,
+    ) -> Result<(), SapientError> {
+        let msg = SapientMessage {
+            node_id: Some(self.inner.config.node_id.clone()),
+            destination_id: Some(node_id.to_string()),
+            timestamp: Some(now_proto_ts()),
+            content: Some(Content::AlertAck(ProtoAlertAck {
+                alert_id: Some(alert_id.to_string()),
+                reason: reasons,
+                alert_ack_status: Some(status.to_proto()),
+            })),
+            additional_information: None,
+        };
+
+        let conns = self.inner.connections.lock().await;
+        if let Some(tx) = conns.get(node_id) {
+            tx.send(msg).await.ok();
+            Ok(())
+        } else {
+            Err(SapientError::NodeNotFound(node_id.to_string()))
+        }
+    }
+
     /// Return a clone of the `Arc` wrapping the node registry.
     ///
     /// Use this to pass the registry to `run_watchdog`:
@@ -290,9 +384,19 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
                         upsert(&inner.registry, node_id, None, None).await;
                     }
                     SapientUpdate::TaskAcknowledged {
-                        node_id, task_id, ..
+                        ref node_id,
+                        ref task_id,
+                        ref status,
+                        ..
                     } => {
                         inner.task_queue.lock().await.ack(node_id, task_id);
+                        if *status == TaskAckStatus::Failed {
+                            warn!(
+                                node_id = %node_id,
+                                task_id = %task_id,
+                                "DLMM reported task failed"
+                            );
+                        }
                     }
                     _ => {}
                 }
@@ -419,15 +523,22 @@ pub fn route_message(
 
         Some(Content::TaskAck(ack)) => {
             let task_id = ack.task_id.unwrap_or_default();
-            let accepted = ack
-                .task_status
-                .and_then(|s| task_ack::TaskStatus::try_from(s).ok())
-                .map(|s| s == task_ack::TaskStatus::Accepted)
-                .unwrap_or(false);
+            let status = TaskAckStatus::from_proto(ack.task_status);
             Ok(SapientUpdate::TaskAcknowledged {
                 node_id,
                 task_id,
-                accepted,
+                status,
+                reasons: ack.reason,
+            })
+        }
+
+        Some(Content::AlertAck(ack)) => {
+            let alert_id = ack.alert_id.unwrap_or_default();
+            let status = AlertAckStatus::from_proto(ack.alert_ack_status);
+            Ok(SapientUpdate::AlertAcknowledged {
+                node_id,
+                alert_id,
+                status,
                 reasons: ack.reason,
             })
         }
@@ -585,18 +696,18 @@ mod tests {
         };
         let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
         if let SapientUpdate::TaskAcknowledged {
-            task_id, accepted, ..
+            task_id, status, ..
         } = update
         {
             assert_eq!(task_id, "01HZTASKID000000000000000000");
-            assert!(accepted, "Accepted status should produce accepted=true");
+            assert_eq!(status, TaskAckStatus::Accepted);
         } else {
             panic!("expected TaskAcknowledged");
         }
     }
 
     #[test]
-    fn task_ack_rejected_produces_accepted_false() {
+    fn task_ack_rejected_produces_rejected_status() {
         use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
         let ack = TaskAck {
             task_id: Some("task-rej".into()),
@@ -606,13 +717,127 @@ mod tests {
         };
         let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
         if let SapientUpdate::TaskAcknowledged {
-            accepted, reasons, ..
+            status, reasons, ..
         } = update
         {
-            assert!(!accepted);
+            assert_eq!(status, TaskAckStatus::Rejected);
             assert_eq!(reasons, ["out of fuel"]);
         } else {
             panic!("expected TaskAcknowledged");
+        }
+    }
+
+    #[test]
+    fn task_ack_completed_produces_completed_status() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
+        let ack = TaskAck {
+            task_id: Some("task-done".into()),
+            task_status: Some(task_ack::TaskStatus::Completed as i32),
+            ..Default::default()
+        };
+        let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        if let SapientUpdate::TaskAcknowledged { status, .. } = update {
+            assert_eq!(status, TaskAckStatus::Completed);
+        } else {
+            panic!("expected TaskAcknowledged");
+        }
+    }
+
+    #[test]
+    fn task_ack_failed_produces_failed_status() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
+        let ack = TaskAck {
+            task_id: Some("task-fail".into()),
+            task_status: Some(task_ack::TaskStatus::Failed as i32),
+            reason: vec!["sensor malfunction".into()],
+            ..Default::default()
+        };
+        let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        if let SapientUpdate::TaskAcknowledged {
+            status, reasons, ..
+        } = update
+        {
+            assert_eq!(status, TaskAckStatus::Failed);
+            assert_eq!(reasons, ["sensor malfunction"]);
+        } else {
+            panic!("expected TaskAcknowledged");
+        }
+    }
+
+    #[test]
+    fn task_ack_unspecified_defaults_to_failed() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::TaskAck;
+        let ack = TaskAck {
+            task_id: Some("task-unk".into()),
+            task_status: None,
+            ..Default::default()
+        };
+        let update = route_message(msg_with("n", Content::TaskAck(ack)), None, None).unwrap();
+        if let SapientUpdate::TaskAcknowledged { status, .. } = update {
+            assert_eq!(status, TaskAckStatus::Failed);
+        } else {
+            panic!("expected TaskAcknowledged");
+        }
+    }
+
+    // --- AlertAck ---
+
+    #[test]
+    fn alert_ack_accepted_routes_to_alert_acknowledged() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::alert_ack;
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::AlertAck;
+        let ack = AlertAck {
+            alert_id: Some("alert-001".into()),
+            alert_ack_status: Some(alert_ack::AlertAckStatus::Accepted as i32),
+            ..Default::default()
+        };
+        let update = route_message(msg_with("n", Content::AlertAck(ack)), None, None).unwrap();
+        if let SapientUpdate::AlertAcknowledged {
+            alert_id, status, ..
+        } = update
+        {
+            assert_eq!(alert_id, "alert-001");
+            assert_eq!(status, AlertAckStatus::Accepted);
+        } else {
+            panic!("expected AlertAcknowledged");
+        }
+    }
+
+    #[test]
+    fn alert_ack_rejected_produces_rejected_status() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::alert_ack;
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::AlertAck;
+        let ack = AlertAck {
+            alert_id: Some("alert-002".into()),
+            alert_ack_status: Some(alert_ack::AlertAckStatus::Rejected as i32),
+            reason: vec!["false positive".into()],
+        };
+        let update = route_message(msg_with("n", Content::AlertAck(ack)), None, None).unwrap();
+        if let SapientUpdate::AlertAcknowledged {
+            status, reasons, ..
+        } = update
+        {
+            assert_eq!(status, AlertAckStatus::Rejected);
+            assert_eq!(reasons, ["false positive"]);
+        } else {
+            panic!("expected AlertAcknowledged");
+        }
+    }
+
+    #[test]
+    fn alert_ack_cancelled_produces_cancelled_status() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::alert_ack;
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::AlertAck;
+        let ack = AlertAck {
+            alert_id: Some("alert-003".into()),
+            alert_ack_status: Some(alert_ack::AlertAckStatus::Cancelled as i32),
+            ..Default::default()
+        };
+        let update = route_message(msg_with("n", Content::AlertAck(ack)), None, None).unwrap();
+        if let SapientUpdate::AlertAcknowledged { status, .. } = update {
+            assert_eq!(status, AlertAckStatus::Cancelled);
+        } else {
+            panic!("expected AlertAcknowledged");
         }
     }
 
@@ -642,10 +867,16 @@ mod tests {
     }
 
     #[test]
-    fn ignored_does_not_panic_on_unknown_content() {
-        use crate::proto::sapient_msg::bsi_flex_335_v2_0::AlertAck;
+    fn error_content_routes_to_ignored() {
+        use crate::proto::sapient_msg::bsi_flex_335_v2_0::Error as SapientProtoError;
         let update = route_message(
-            msg_with("n", Content::AlertAck(AlertAck::default())),
+            msg_with(
+                "n",
+                Content::Error(SapientProtoError {
+                    packet: None,
+                    error_message: vec![],
+                }),
+            ),
             None,
             None,
         )
