@@ -5,10 +5,12 @@ use peat_sapient::bridge::route_message;
 use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::alert::{
     AlertStatus, AlertType, DiscretePriority, LocationOneof as AlertLocationOneof,
 };
+use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::alert_ack::AlertAckStatus;
 use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::task::Control;
 use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::task_ack::TaskStatus;
 use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::{
-    Alert, AssociatedDetection, Location, LocationCoordinateSystem, LocationDatum, Task, TaskAck,
+    Alert, AlertAck, AssociatedDetection, Location, LocationCoordinateSystem, LocationDatum, Task,
+    TaskAck,
 };
 use peat_sapient::proto::{Content, SapientMessage};
 use peat_sapient::task_queue::TaskQueue;
@@ -148,6 +150,23 @@ fn bench_route_task_ack(c: &mut Criterion) {
     });
 }
 
+fn bench_route_alert_ack(c: &mut Criterion) {
+    let msg = SapientMessage {
+        timestamp: None,
+        node_id: Some("hldmm-bench-001".into()),
+        destination_id: None,
+        content: Some(Content::AlertAck(AlertAck {
+            alert_id: Some("01HZALERTACK00000000000000A".into()),
+            alert_ack_status: Some(AlertAckStatus::Accepted as i32),
+            ..Default::default()
+        })),
+        additional_information: None,
+    };
+    c.bench_function("route_message (AlertAck)", |b| {
+        b.iter(|| route_message(black_box(msg.clone()), None, None))
+    });
+}
+
 // ── TaskQueue benchmarks ────────────────────────────────────────────────────
 
 fn bench_task_queue_enqueue(c: &mut Criterion) {
@@ -213,7 +232,12 @@ fn bench_task_queue_pending_for(c: &mut Criterion) {
 
 criterion_group!(transforms, bench_from_alert, bench_to_task,);
 
-criterion_group!(routing, bench_route_alert, bench_route_task_ack,);
+criterion_group!(
+    routing,
+    bench_route_alert,
+    bench_route_task_ack,
+    bench_route_alert_ack,
+);
 
 criterion_group!(
     task_queue,

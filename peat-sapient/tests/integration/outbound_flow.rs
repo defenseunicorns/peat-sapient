@@ -1,9 +1,9 @@
-//! Outbound integration tests: peat-sapient HLDMM → DLMM Task flow.
+//! Outbound integration tests: peat-sapient HLDMM → DLMM Task and AlertAck flows.
 //!
-//! These tests exercise the full `transform::task::to_task` → codec → TCP send path.
+//! These tests exercise the full codec → TCP send path for outbound messages.
 //! peat-sapient acts as the HLDMM (listener); the test spins up a lightweight DLMM
 //! peer using the same `connection` primitives, simulating a sensor that registers and
-//! then receives a Task.
+//! then receives a Task or AlertAck.
 //!
 //! When Apex is available, `apex_round_trip_task` additionally routes the Task through
 //! the live middleware before asserting the TaskAck.
@@ -12,9 +12,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use peat_sapient::{
-    bridge::{route_message, SapientUpdate, TaskAckStatus},
+    bridge::{route_message, AlertAckStatus, SapientUpdate, TaskAckStatus},
     connection::{self, ReconnectConfig},
-    proto::sapient_msg::bsi_flex_335_v2_0::{task_ack, Registration, SapientMessage, TaskAck},
+    proto::sapient_msg::bsi_flex_335_v2_0::{
+        alert_ack, task_ack, AlertAck, Registration, SapientMessage, TaskAck,
+    },
     transform::task::to_task,
     Content,
 };
@@ -192,6 +194,71 @@ async fn task_fields_survive_codec_round_trip() {
         sent_dest_id,
         "destination_id must survive codec round-trip"
     );
+}
+
+/// End-to-end AlertAck send: the HLDMM (bridge side) sends an AlertAck over TCP
+/// and the simulated DLMM receives it with all fields intact, then routes it
+/// through `route_message` to verify the `AlertAcknowledged` variant.
+#[tokio::test]
+async fn alert_ack_sent_and_received_loopback() {
+    let (listener, hldmm_addr) = local_listener().await;
+
+    let alert_id = "01HZALERTACK00000000E2E0001".to_string();
+    let alert_id_clone = alert_id.clone();
+
+    // DLMM peer: accept connection, receive AlertAck
+    let dlmm_handle = tokio::spawn(async move {
+        let (mut framed, _) = connection::accept(&listener).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), connection::recv(&mut framed))
+            .await
+            .expect("timed out waiting for AlertAck")
+            .unwrap()
+            .expect("connection closed before AlertAck")
+    });
+
+    // HLDMM side: connect and send an AlertAck
+    let config = ReconnectConfig {
+        initial_delay: Duration::from_millis(50),
+        max_delay: Duration::from_millis(200),
+    };
+    let mut hldmm_framed = connection::connect_with_retry(hldmm_addr, &config)
+        .await
+        .expect("HLDMM connect");
+
+    let hldmm_node_id = uuid::Uuid::new_v4().to_string();
+    let dlmm_node_id = uuid::Uuid::new_v4().to_string();
+
+    let msg = SapientMessage {
+        node_id: Some(hldmm_node_id.clone()),
+        destination_id: Some(dlmm_node_id.clone()),
+        content: Some(Content::AlertAck(AlertAck {
+            alert_id: Some(alert_id_clone),
+            alert_ack_status: Some(alert_ack::AlertAckStatus::Rejected as i32),
+            reason: vec!["false positive".into(), "duplicate".into()],
+        })),
+        ..Default::default()
+    };
+
+    connection::send(&mut hldmm_framed, msg)
+        .await
+        .expect("send AlertAck");
+
+    // Verify the DLMM received it and route_message produces AlertAcknowledged
+    let received = dlmm_handle.await.unwrap();
+    let update = route_message(received, None, None).expect("route_message on AlertAck");
+    if let SapientUpdate::AlertAcknowledged {
+        alert_id: recv_alert_id,
+        status,
+        reasons,
+        ..
+    } = update
+    {
+        assert_eq!(recv_alert_id, alert_id);
+        assert_eq!(status, AlertAckStatus::Rejected);
+        assert_eq!(reasons, ["false positive", "duplicate"]);
+    } else {
+        panic!("expected AlertAcknowledged, got {update:?}");
+    }
 }
 
 /// When Apex is available: connect as DLMM, send a Registration, then
