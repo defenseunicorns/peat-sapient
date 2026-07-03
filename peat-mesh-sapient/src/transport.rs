@@ -117,6 +117,12 @@ impl PeatSapientTransport {
             event_senders: Arc::new(RwLock::new(Vec::new())),
             started: RwLock::new(None),
             listener_task: RwLock::new(None),
+            // `..Default::default()` deliberately, not an exhaustive struct
+            // literal: `TransportCapabilities` has picked up fields between
+            // published `peat-mesh` rc's before (e.g. `beacon_capable`), and
+            // exhaustive construction breaks the moment the field set drifts
+            // in either direction. Only override what this transport
+            // actually differs on from the default.
             capabilities: TransportCapabilities {
                 transport_type: TransportType::Custom(SAPIENT_TRANSPORT_TYPE_TAG),
                 max_bandwidth_bps: 0,
@@ -125,10 +131,7 @@ impl PeatSapientTransport {
                 bidirectional: true,
                 reliable: true,
                 battery_impact: 0,
-                supports_broadcast: false,
-                requires_pairing: false,
-                max_message_size: 0,
-                beacon_capable: false,
+                ..Default::default()
             },
         }
     }
