@@ -241,6 +241,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enqueue_returns_evicted_task_id() {
+        let mut q = TaskQueue::new(2, Duration::from_secs(60));
+        assert_eq!(
+            q.enqueue("node-1", "task-a".into(), task_msg("task-a")),
+            None
+        );
+        assert_eq!(
+            q.enqueue("node-1", "task-b".into(), task_msg("task-b")),
+            None
+        );
+        assert_eq!(
+            q.enqueue("node-1", "task-c".into(), task_msg("task-c")),
+            Some("task-a".to_string()),
+            "enqueue must return the evicted task_id"
+        );
+    }
+
+    #[tokio::test]
     async fn is_empty_for_unknown_node_returns_true() {
         let q = TaskQueue::new(10, Duration::from_secs(60));
         assert!(q.is_empty_for("ghost"));
@@ -274,6 +292,22 @@ mod tests {
         q.drain_expired();
 
         assert!(q.is_empty_for("node-1"), "stale task should be expired");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_expired_returns_expired_task_ids() {
+        let mut q = TaskQueue::new(10, Duration::from_secs(30));
+        q.enqueue("node-1", "task-old-a".into(), task_msg("task-old-a"));
+        q.enqueue("node-1", "task-old-b".into(), task_msg("task-old-b"));
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let expired = q.drain_expired();
+
+        assert_eq!(
+            expired,
+            vec!["task-old-a".to_string(), "task-old-b".to_string()],
+            "drain_expired must return the task_ids of all expired tasks"
+        );
     }
 
     #[tokio::test(start_paused = true)]

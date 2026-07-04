@@ -304,6 +304,82 @@ async fn expired_task_is_not_replayed_on_reconnect() {
     );
 }
 
+/// After TTL expiry, the `task_commands` correlation entry is reaped: a
+/// TaskAck for the expired task_id carries `command_id: None`.
+#[tokio::test]
+async fn expired_task_reaps_command_id_correlation() {
+    let mut config = bridge_config();
+    config.task_ttl = Duration::from_millis(100);
+    let (bridge, mut updates) = SapientBridge::new(config);
+    let addr = bridge.start().await.unwrap();
+
+    // Enqueue task with a command_id before DLMM connects.
+    let cmd = isr_command();
+    let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &cmd).unwrap();
+    let task_id = match &task_msg.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("expected Task content"),
+    };
+    bridge
+        .send_task(
+            "dlmm-test-uuid",
+            task_msg,
+            Some("cmd-should-be-reaped".into()),
+        )
+        .await
+        .unwrap();
+
+    // Wait past TTL so the task expires.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // DLMM connects — expired task is not replayed, and drain_expired
+    // cleans up the task_commands entry.
+    let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+    connection::send(&mut dlmm, registration_msg("dlmm-test-uuid"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered
+
+    // Now send a TaskAck for the expired task_id — the bridge should
+    // emit TaskAcknowledged with command_id: None (reaped, not orphaned).
+    connection::send(
+        &mut dlmm,
+        SapientMessage {
+            node_id: Some("dlmm-test-uuid".into()),
+            content: Some(Content::TaskAck(TaskAck {
+                task_id: Some(task_id),
+                task_status: Some(task_ack::TaskStatus::Accepted as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+    if let SapientUpdate::TaskAcknowledged {
+        command_id: recv_cmd_id,
+        ..
+    } = update
+    {
+        assert_eq!(
+            recv_cmd_id, None,
+            "expired task's command_id should have been reaped"
+        );
+    } else {
+        panic!("expected TaskAcknowledged, got {update:?}");
+    }
+}
+
 /// When `send_task` is called with a `command_id`, the resulting
 /// `TaskAcknowledged` carries that `command_id` for upstream correlation.
 #[tokio::test]
