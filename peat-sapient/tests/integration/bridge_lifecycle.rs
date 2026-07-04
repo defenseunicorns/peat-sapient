@@ -14,6 +14,7 @@ use peat_sapient::{
         task_ack, Registration, SapientMessage, TaskAck,
     },
     transform::task::to_task,
+    watchdog::run_watchdog,
 };
 use peat_schema::command::v1::{
     hierarchical_command::CommandType, mission_order::MissionType, CommandTarget,
@@ -452,4 +453,200 @@ async fn task_ack_carries_command_id() {
     } else {
         panic!("expected TaskAcknowledged, got {update:?}");
     }
+}
+
+/// Two DLMMs connected simultaneously receive independent tasks and their
+/// TaskAcks route independently.
+#[tokio::test]
+async fn two_dlmms_receive_independent_tasks() {
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
+
+    // --- Connect and register two DLMMs ---
+    let mut dlmm_a = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+    connection::send(&mut dlmm_a, registration_msg("dlmm-a"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm_a).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered(dlmm-a)
+
+    let mut dlmm_b = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+    connection::send(&mut dlmm_b, registration_msg("dlmm-b"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm_b).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered(dlmm-b)
+
+    // --- Send a distinct task to each ---
+    let cmd_a = HierarchicalCommand {
+        command_id: "cmd-a".into(),
+        originator_id: "hldmm-test-uuid".into(),
+        target: Some(CommandTarget {
+            scope: 1,
+            target_ids: vec!["dlmm-a".into()],
+        }),
+        command_type: Some(CommandType::MissionOrder(MissionOrder {
+            mission_type: MissionType::Isr as i32,
+            mission_id: "mission-a".into(),
+            description: "task for A".into(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let cmd_b = HierarchicalCommand {
+        command_id: "cmd-b".into(),
+        originator_id: "hldmm-test-uuid".into(),
+        target: Some(CommandTarget {
+            scope: 1,
+            target_ids: vec!["dlmm-b".into()],
+        }),
+        command_type: Some(CommandType::MissionOrder(MissionOrder {
+            mission_type: MissionType::Isr as i32,
+            mission_id: "mission-b".into(),
+            description: "task for B".into(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    let task_a = to_task("hldmm-test-uuid", "dlmm-a", &cmd_a).unwrap();
+    let task_b = to_task("hldmm-test-uuid", "dlmm-b", &cmd_b).unwrap();
+    let task_id_a = match &task_a.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("expected Task"),
+    };
+    let task_id_b = match &task_b.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("expected Task"),
+    };
+
+    bridge.send_task("dlmm-a", task_a, None).await.unwrap();
+    bridge.send_task("dlmm-b", task_b, None).await.unwrap();
+
+    // --- Each DLMM receives only its own task ---
+    let recv_a = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm_a))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let recv_b = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm_b))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    let recv_task_id_a = match &recv_a.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("dlmm-a should receive Task, got {:?}", recv_a.content),
+    };
+    let recv_task_id_b = match &recv_b.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("dlmm-b should receive Task, got {:?}", recv_b.content),
+    };
+    assert_eq!(recv_task_id_a, task_id_a, "dlmm-a got wrong task");
+    assert_eq!(recv_task_id_b, task_id_b, "dlmm-b got wrong task");
+
+    // --- TaskAck from A does not affect B's queue ---
+    connection::send(
+        &mut dlmm_a,
+        SapientMessage {
+            node_id: Some("dlmm-a".into()),
+            content: Some(Content::TaskAck(TaskAck {
+                task_id: Some(task_id_a),
+                task_status: Some(task_ack::TaskStatus::Accepted as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let ack_update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            &ack_update,
+            SapientUpdate::TaskAcknowledged { node_id, .. } if node_id == "dlmm-a"
+        ),
+        "expected TaskAcknowledged for dlmm-a, got {ack_update:?}"
+    );
+
+    // Drop dlmm-a, reconnect — B's task should NOT replay for A.
+    drop(dlmm_a);
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // NodeDisconnected(dlmm-a)
+
+    let mut dlmm_a2 = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+    connection::send(&mut dlmm_a2, registration_msg("dlmm-a"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm_a2).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered(dlmm-a)
+
+    // A should have no replayed task (it was acked before disconnect).
+    let timeout_result =
+        tokio::time::timeout(Duration::from_millis(300), connection::recv(&mut dlmm_a2)).await;
+    assert!(
+        timeout_result.is_err(),
+        "dlmm-a should have no replayed task after ack + reconnect"
+    );
+}
+
+/// A DLMM that registers and then goes silent (no StatusReport) triggers
+/// `NodeDisconnected` from the watchdog after `2 × heartbeat_interval`.
+#[tokio::test]
+async fn watchdog_fires_node_disconnected_on_silent_dlmm() {
+    let heartbeat = Duration::from_millis(100);
+    let mut config = bridge_config();
+    config.heartbeat_interval = heartbeat;
+    let (bridge, mut updates) = SapientBridge::new(config);
+    let addr = bridge.start().await.unwrap();
+
+    // Spawn the watchdog with the same short interval.
+    let (wd_tx, mut wd_rx) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(run_watchdog(bridge.registry(), heartbeat, wd_tx));
+
+    // Connect and register a DLMM.
+    let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+    connection::send(&mut dlmm, registration_msg("silent-sensor"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered
+
+    // Go silent — no more StatusReports. Wait for 2× heartbeat + margin.
+    tokio::time::sleep(heartbeat * 3).await;
+
+    // Watchdog should have fired NodeDisconnected.
+    let wd_update = tokio::time::timeout(Duration::from_secs(2), wd_rx.recv())
+        .await
+        .expect("timed out waiting for watchdog NodeDisconnected")
+        .expect("watchdog channel closed");
+    assert!(
+        matches!(
+            &wd_update,
+            SapientUpdate::NodeDisconnected { node_id } if node_id == "silent-sensor"
+        ),
+        "expected NodeDisconnected for silent-sensor, got {wd_update:?}"
+    );
 }
