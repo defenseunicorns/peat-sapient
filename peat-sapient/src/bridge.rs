@@ -266,8 +266,17 @@ impl SapientBridge {
 
         {
             let mut q = self.inner.task_queue.lock().await;
-            q.drain_expired();
-            q.enqueue(node_id, task_id, msg.clone());
+            let expired = q.drain_expired();
+            let evicted = q.enqueue(node_id, task_id, msg.clone());
+            if !expired.is_empty() || evicted.is_some() {
+                let mut cmds = self.inner.task_commands.lock().await;
+                for id in expired {
+                    cmds.remove(&id);
+                }
+                if let Some(id) = evicted {
+                    cmds.remove(&id);
+                }
+            }
         }
 
         // If the node is connected, send immediately. Errors are intentionally
@@ -385,7 +394,13 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
 
             let pending = {
                 let mut q = inner.task_queue.lock().await;
-                q.drain_expired();
+                let expired = q.drain_expired();
+                if !expired.is_empty() {
+                    let mut cmds = inner.task_commands.lock().await;
+                    for id in expired {
+                        cmds.remove(&id);
+                    }
+                }
                 q.pending_for(&msg_node_id)
             };
             for task_msg in pending {
