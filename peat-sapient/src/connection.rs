@@ -86,6 +86,12 @@ pub async fn send(framed: &mut SapientFramed, msg: SapientMessage) -> Result<(),
     framed.send(msg).await
 }
 
+/// Send pre-encoded protobuf bytes over a framed connection, avoiding a
+/// decode/re-encode round-trip when the payload is already serialised.
+pub async fn send_raw(framed: &mut SapientFramed, bytes: Vec<u8>) -> Result<(), SapientError> {
+    framed.send(bytes).await
+}
+
 /// Receive a single `SapientMessage` from a framed connection.
 /// Returns `None` if the peer closed the connection.
 pub async fn recv(framed: &mut SapientFramed) -> Result<Option<SapientMessage>, SapientError> {

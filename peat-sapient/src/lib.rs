@@ -52,6 +52,9 @@ pub mod transform;
 #[cfg(feature = "peat")]
 pub mod watchdog;
 
+#[cfg(feature = "translator-codec")]
+pub mod mesh_fields;
+
 pub use error::SapientError;
 pub use proto::{
     Alert, AlertAck, Content, DetectionReport, Registration, RegistrationAck, SapientMessage,

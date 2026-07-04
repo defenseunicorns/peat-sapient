@@ -55,16 +55,18 @@ jobs:
             label: layer1-only
           - features: --features peat
             label: with-peat
+          - features: --features translator-codec
+            label: with-translator-codec
     steps:
       - uses: actions/checkout@v4
-      - name: Install protoc (required by peat-schema build.rs when feature=peat)
-        if: matrix.label == 'with-peat'
+      - name: Install protoc (required by peat-schema build.rs when feature=peat/translator-codec)
+        if: matrix.label == 'with-peat' || matrix.label == 'with-translator-codec'
         run: sudo apt-get update -y && sudo apt-get install -y protobuf-compiler
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: features-${{ matrix.label }}
-      - run: cargo check ${{ matrix.features }}
+      - run: cargo check -p peat-sapient ${{ matrix.features }}
 
   audit:
     name: Security Audit
