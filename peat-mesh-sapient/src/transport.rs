@@ -675,4 +675,209 @@ mod tests {
             );
         }
     }
+
+    fn make_dlmm_transport() -> PeatSapientTransport {
+        let backend: Arc<dyn peat_mesh::sync::DataSyncBackend> =
+            Arc::new(InMemoryBackend::new_initialized());
+        let node = Arc::new(MeshNode::new(backend));
+        let translator = Arc::new(SapientTranslator::new());
+        PeatSapientTransport::new(
+            SapientRole::Dlmm {
+                remote_addr: "127.0.0.1:19999".parse().unwrap(),
+                peer_node_id: NodeId::from("peer-dlmm"),
+            },
+            node,
+            translator,
+        )
+    }
+
+    fn register_fake_peer(transport: &PeatSapientTransport, id: &str, alive: bool) {
+        PeatSapientTransport::register_peer(
+            &transport.peers,
+            &transport.event_senders,
+            NodeId::from(id),
+            Instant::now(),
+            Arc::new(AtomicBool::new(alive)),
+            tokio::spawn(async {}),
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_returns_connection_for_registered_peer() {
+        let transport = make_transport();
+        register_fake_peer(&transport, "peer-conn", true);
+
+        let conn = transport
+            .connect(&NodeId::from("peer-conn"))
+            .await
+            .expect("connect");
+        assert_eq!(conn.peer_id(), &NodeId::from("peer-conn"));
+        assert!(conn.is_alive());
+    }
+
+    #[tokio::test]
+    async fn connect_unknown_peer_errors() {
+        let transport = make_transport();
+        let result = transport.connect(&NodeId::from("ghost")).await;
+        assert!(matches!(result, Err(TransportError::PeerNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_connection_returns_none_for_unknown_peer() {
+        let transport = make_transport();
+        assert!(transport.get_connection(&NodeId::from("nope")).is_none());
+    }
+
+    #[tokio::test]
+    async fn get_connection_returns_handle_with_correct_alive_state() {
+        let transport = make_transport();
+        register_fake_peer(&transport, "alive-peer", true);
+        register_fake_peer(&transport, "dead-peer", false);
+
+        let alive_conn = transport
+            .get_connection(&NodeId::from("alive-peer"))
+            .unwrap();
+        assert!(alive_conn.is_alive());
+
+        let dead_conn = transport
+            .get_connection(&NodeId::from("dead-peer"))
+            .unwrap();
+        assert!(!dead_conn.is_alive());
+    }
+
+    #[tokio::test]
+    async fn get_peer_health_alive_reports_healthy() {
+        let transport = make_transport();
+        register_fake_peer(&transport, "healthy-peer", true);
+
+        let health = transport
+            .get_peer_health(&NodeId::from("healthy-peer"))
+            .expect("health");
+        assert!(matches!(health.state, ConnectionState::Healthy));
+    }
+
+    #[tokio::test]
+    async fn get_peer_health_dead_reports_dead() {
+        let transport = make_transport();
+        register_fake_peer(&transport, "dead-peer", false);
+
+        let health = transport
+            .get_peer_health(&NodeId::from("dead-peer"))
+            .expect("health");
+        assert!(matches!(health.state, ConnectionState::Dead));
+    }
+
+    #[tokio::test]
+    async fn get_peer_health_unknown_returns_none() {
+        let transport = make_transport();
+        assert!(transport.get_peer_health(&NodeId::from("x")).is_none());
+    }
+
+    #[test]
+    fn capabilities_returns_sapient_transport_type() {
+        let transport = make_transport();
+        assert!(matches!(
+            transport.capabilities().transport_type,
+            TransportType::Custom(SAPIENT_TRANSPORT_TYPE_TAG)
+        ));
+        assert!(transport.capabilities().reliable);
+        assert!(transport.capabilities().bidirectional);
+    }
+
+    #[test]
+    fn is_available_false_before_start() {
+        let transport = make_transport();
+        assert!(!transport.is_available());
+    }
+
+    #[tokio::test]
+    async fn can_reach_reflects_connected_peers() {
+        let transport = make_transport();
+        assert!(!transport.can_reach(&NodeId::from("peer-r")));
+        register_fake_peer(&transport, "peer-r", true);
+        assert!(transport.can_reach(&NodeId::from("peer-r")));
+    }
+
+    #[tokio::test]
+    async fn stop_clears_peers_and_marks_unavailable() {
+        let transport = make_transport();
+        *transport.started.write().unwrap() = Some(Instant::now());
+        register_fake_peer(&transport, "p1", true);
+        register_fake_peer(&transport, "p2", true);
+        assert_eq!(transport.peer_count(), 2);
+        assert!(transport.is_available());
+
+        transport.stop().await.expect("stop");
+
+        assert_eq!(transport.peer_count(), 0);
+        assert!(!transport.is_available());
+    }
+
+    #[tokio::test]
+    async fn hldmm_outbound_sink_discards_silently() {
+        let transport = make_transport();
+        let sink = transport.outbound_sink();
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        sink.send_outbound(vec![1, 2, 3], &ctx)
+            .await
+            .expect("hldmm sink should discard without error");
+    }
+
+    #[tokio::test]
+    async fn dlmm_outbound_sink_has_sender() {
+        let transport = make_dlmm_transport();
+        let sink = transport.outbound_sink();
+        let msg = SapientMessage {
+            node_id: Some("test".into()),
+            ..Default::default()
+        };
+        let bytes = msg.encode_to_vec();
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        sink.send_outbound(bytes, &ctx)
+            .await
+            .expect("dlmm sink should accept valid protobuf");
+    }
+
+    #[test]
+    fn collection_for_detection_report_is_tracks() {
+        let msg = SapientMessage {
+            content: Some(Content::DetectionReport(
+                peat_sapient::proto::DetectionReport::default(),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(PeatSapientTransport::collection_for(&msg), Some("tracks"));
+    }
+
+    #[test]
+    fn collection_for_registration_is_platforms() {
+        let msg = SapientMessage {
+            content: Some(Content::Registration(
+                peat_sapient::proto::Registration::default(),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            PeatSapientTransport::collection_for(&msg),
+            Some("platforms")
+        );
+    }
+
+    #[test]
+    fn collection_for_task_returns_none() {
+        let msg = SapientMessage {
+            content: Some(Content::Task(peat_sapient::proto::Task::default())),
+            ..Default::default()
+        };
+        assert_eq!(PeatSapientTransport::collection_for(&msg), None);
+    }
+
+    #[test]
+    fn collection_for_no_content_returns_none() {
+        let msg = SapientMessage {
+            content: None,
+            ..Default::default()
+        };
+        assert_eq!(PeatSapientTransport::collection_for(&msg), None);
+    }
 }

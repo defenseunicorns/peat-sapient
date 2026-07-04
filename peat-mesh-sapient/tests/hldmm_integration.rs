@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use peat_mesh::sync::{DataSyncBackend, InMemoryBackend, Query};
-use peat_mesh::transport::MeshTransport;
+use peat_mesh::transport::{MeshTransport, Transport};
 use peat_mesh::Node;
 use peat_mesh_sapient::{PeatSapientTransport, SapientRole, SapientTranslator};
 use peat_sapient::connection;
@@ -308,4 +308,62 @@ async fn full_dlmm_lifecycle_lands_in_correct_collections() {
         Some(48.8566),
         "StatusReport position should be reflected in platforms document"
     );
+}
+
+/// When a DLMM drops the connection, the HLDMM's recv loop exits and the
+/// peer's alive flag flips to false.
+#[tokio::test]
+async fn hldmm_peer_alive_flips_false_on_dlmm_disconnect() {
+    let (transport, listen_addr, _node) = start_hldmm().await;
+
+    let framed = connection::connect(listen_addr)
+        .await
+        .expect("dlmm connect");
+
+    // Wait for the peer to register.
+    for _ in 0..50 {
+        if transport.peer_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(transport.peer_count(), 1);
+    let peers = transport.connected_peers();
+    let peer_id = &peers[0];
+    let conn = transport.get_connection(peer_id).expect("get_connection");
+    assert!(conn.is_alive());
+
+    // Drop the DLMM side.
+    drop(framed);
+
+    for _ in 0..100 {
+        if !conn.is_alive() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!conn.is_alive(), "peer should be dead after DLMM drops");
+}
+
+/// stop() terminates the accept loop and clears all peers.
+#[tokio::test]
+async fn stop_terminates_hldmm() {
+    let (transport, listen_addr, _node) = start_hldmm().await;
+
+    let _framed = connection::connect(listen_addr)
+        .await
+        .expect("dlmm connect");
+
+    for _ in 0..50 {
+        if transport.peer_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(transport.is_available());
+
+    transport.stop().await.expect("stop");
+
+    assert!(!transport.is_available());
+    assert_eq!(transport.peer_count(), 0);
 }
