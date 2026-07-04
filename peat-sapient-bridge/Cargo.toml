@@ -1,0 +1,27 @@
+[package]
+name = "peat-sapient-bridge"
+version = "0.1.0"
+edition = "2021"
+authors = ["Kit Plummer <kitplummer@defenseunicorns.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/defenseunicorns/peat-sapient"
+description = "Bidirectional SAPIENT ↔ mesh bridge service — connects BSI Flex 335 v2.0 environments to the Peat mesh for cross-protocol data flow"
+
+[[bin]]
+name = "peat-sapient-bridge"
+path = "src/main.rs"
+
+[dependencies]
+peat-mesh = { version = "0.9.0-rc.41", features = ["automerge-backend"] }
+peat-mesh-sapient = { path = "../peat-mesh-sapient" }
+peat-sapient = { path = "../peat-sapient" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tempfile = "3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

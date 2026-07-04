@@ -1,0 +1,32 @@
+# peat-sapient-bridge configuration
+#
+# CLI flags override any value set here.
+# Run with: peat-sapient-bridge --config bridge.toml
+
+[node]
+# Friendly name — also used as the iroh identity seed (same name = same NodeId).
+name = "bridge-uk"
+# Mesh bind address for iroh QUIC endpoint. Peers reach this node at this addr.
+bind = "0.0.0.0:9001"
+# Persistence directory. Omit for a tempdir (data lost on restart).
+# storage = "/var/lib/peat-sapient-bridge"
+
+[mesh]
+# Formation identifier and shared secret for authenticated mesh sync.
+# All bridge nodes in a formation must share these values.
+formation_id = "sapient-bridge"
+shared_key = "c2FwaWVudC1icmlkZ2Utc2VjcmV0LWtleQ=="
+# Static mesh peers: NODE_ID_HEX@ADDR. Connect to other bridge instances.
+# peers = [
+#     "abc123...64hexchars...@10.0.0.2:9001",
+# ]
+
+[sapient]
+# "hldmm" — accept DLMM connections from SAPIENT sensors.
+# "dlmm"  — connect to an external HLDMM (e.g. Apex middleware).
+role = "hldmm"
+# HLDMM mode: listen address for incoming DLMM connections.
+listen = "0.0.0.0:12000"
+# DLMM mode: remote HLDMM address and peer identity.
+# remote = "10.0.1.5:12000"
+# peer_node_id = "external-hldmm"
