@@ -106,9 +106,9 @@ fn bench_batch_detection_throughput(c: &mut Criterion) {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
                 for _ in 0..iters {
-                    batch_num += 1;
                     let base = batch_num * batch_size;
-                    let target = (base + batch_size) as usize;
+                    batch_num += 1;
+                    let target = (batch_num * batch_size) as usize;
 
                     let elapsed = rt.block_on(async {
                         let start = std::time::Instant::now();

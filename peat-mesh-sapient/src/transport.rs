@@ -111,7 +111,7 @@ type EventSenders = Arc<RwLock<Vec<mpsc::Sender<PeerEvent>>>>;
 /// [`OutboundSink`] for SAPIENT — sends encoded protobuf bytes to the
 /// connected HLDMM (DLMM mode) or discards them (HLDMM mode).
 pub struct SapientOutboundSink {
-    sender: Option<mpsc::Sender<SapientMessage>>,
+    sender: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 #[async_trait]
@@ -120,9 +120,8 @@ impl OutboundSink for SapientOutboundSink {
         let Some(sender) = &self.sender else {
             return Ok(());
         };
-        let msg = SapientMessage::decode(bytes.as_slice())?;
         sender
-            .send(msg)
+            .send(bytes)
             .await
             .map_err(|_| anyhow::anyhow!("sapient outbound channel closed"))?;
         Ok(())
@@ -141,8 +140,8 @@ pub struct PeatSapientTransport {
     started: RwLock<Option<Instant>>,
     listener_task: RwLock<Option<JoinHandle<()>>>,
     capabilities: TransportCapabilities,
-    outbound_tx: mpsc::Sender<SapientMessage>,
-    outbound_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<SapientMessage>>>>,
+    outbound_tx: mpsc::Sender<Vec<u8>>,
+    outbound_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
 }
 
 impl PeatSapientTransport {
@@ -186,12 +185,11 @@ impl PeatSapientTransport {
     ///
     /// [`TransportManager::register_translator`]: peat_mesh::transport::TransportManager::register_translator
     pub fn outbound_sink(&self) -> Arc<dyn OutboundSink> {
-        match &self.role {
-            SapientRole::Dlmm { .. } => Arc::new(SapientOutboundSink {
-                sender: Some(self.outbound_tx.clone()),
-            }),
-            SapientRole::Hldmm { .. } => Arc::new(SapientOutboundSink { sender: None }),
-        }
+        let sender = match &self.role {
+            SapientRole::Dlmm { .. } => Some(self.outbound_tx.clone()),
+            SapientRole::Hldmm { .. } => None,
+        };
+        Arc::new(SapientOutboundSink { sender })
     }
 
     fn emit_event(&self, event: PeerEvent) {
@@ -338,7 +336,7 @@ impl PeatSapientTransport {
     /// connection, using `select!` to alternate.
     async fn run_dlmm_peer_loop(
         mut framed: SapientFramed,
-        mut outbound_rx: mpsc::Receiver<SapientMessage>,
+        mut outbound_rx: mpsc::Receiver<Vec<u8>>,
         peer_id: NodeId,
         translator: Arc<SapientTranslator>,
         node: Arc<MeshNode>,
@@ -384,11 +382,10 @@ impl PeatSapientTransport {
                     }
                 }
                 outbound = outbound_rx.recv() => {
-                    if let Some(msg) = outbound {
-                        if let Err(err) = connection::send(&mut framed, msg).await {
-                            warn!(peer = %peer_id, %err, "sapient: outbound send failed");
-                            break;
-                        }
+                    let Some(raw) = outbound else { break; };
+                    if let Err(err) = connection::send_raw(&mut framed, raw).await {
+                        warn!(peer = %peer_id, %err, "sapient: outbound send failed");
+                        break;
                     }
                 }
             }
@@ -403,7 +400,7 @@ impl PeatSapientTransport {
         node: Arc<MeshNode>,
         peers: PeerMap,
         event_senders: EventSenders,
-        outbound_rx: mpsc::Receiver<SapientMessage>,
+        outbound_rx: mpsc::Receiver<Vec<u8>>,
     ) {
         let framed =
             match connection::connect_with_retry(remote_addr, &ReconnectConfig::default()).await {

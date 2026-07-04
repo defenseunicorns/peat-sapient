@@ -51,9 +51,9 @@ pub async fn run_bridge_subscriber(mut rx: mpsc::Receiver<SapientUpdate>, node: 
             SapientUpdate::StatusUpdated {
                 ref node_id,
                 ref state,
-                ref capability_delta,
+                capability_delta,
             } => {
-                let advertisement = capability_delta.clone().unwrap_or(CapabilityAdvertisement {
+                let advertisement = capability_delta.unwrap_or_else(|| CapabilityAdvertisement {
                     node_id: node_id.clone(),
                     ..Default::default()
                 });
