@@ -18,4 +18,4 @@ pub mod transport;
 
 pub use subscriber::run_bridge_subscriber;
 pub use translator::SapientTranslator;
-pub use transport::{PeatSapientTransport, SapientRole};
+pub use transport::{PeatSapientTransport, SapientOutboundSink, SapientRole};
