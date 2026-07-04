@@ -10,6 +10,11 @@
 //! already use for the same collections (`lat`/`lon`/`hae`/`timestamp_ms`
 //! for `tracks`) so multiple translators can read the same mesh `Document`
 //! without agreeing on anything beyond field names.
+//!
+//! `timestamp_ms` is always `i64` (milliseconds since Unix epoch) regardless
+//! of whether the originating protocol uses signed or unsigned timestamps.
+//! This matches `chrono::DateTime::timestamp_millis()` (used by CoT) and
+//! covers all practical values; consumers should read via `as_i64()`.
 
 use peat_schema::{
     capability::v1::{CapabilityAdvertisement, OperationalStatus},
@@ -41,7 +46,7 @@ pub fn track_to_fields(track: &Track) -> (String, Map<String, Value>) {
 
     if let Some(last_seen) = &track.last_seen {
         let ms = last_seen.seconds.saturating_mul(1000) + (last_seen.nanos / 1_000_000) as u64;
-        fields.insert("timestamp_ms".into(), json!(ms));
+        fields.insert("timestamp_ms".into(), json!(ms as i64));
     }
 
     if !track.classification.is_empty() {
@@ -201,7 +206,7 @@ mod tests {
         assert_eq!(fields["lat"], json!(34.05));
         assert_eq!(fields["lon"], json!(-118.25));
         assert_eq!(fields["hae"], json!(120.0));
-        assert_eq!(fields["timestamp_ms"], json!(1_700_000_000_500u64));
+        assert_eq!(fields["timestamp_ms"], json!(1_700_000_000_500i64));
         assert_eq!(fields["sapient_classification"], json!("vehicle"));
         assert_eq!(fields["sapient_source_node_id"], json!("sensor-42"));
         assert!(
