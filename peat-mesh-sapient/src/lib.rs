@@ -12,8 +12,10 @@
 //! `platforms`. `Task`/`TaskAck` stay on `peat-sapient`'s existing
 //! `SapientBridge`/`TaskQueue` path — see [`translator`] module docs for why.
 
+pub mod subscriber;
 pub mod translator;
 pub mod transport;
 
+pub use subscriber::run_bridge_subscriber;
 pub use translator::SapientTranslator;
 pub use transport::{PeatSapientTransport, SapientRole};
