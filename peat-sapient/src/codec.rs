@@ -31,6 +31,18 @@ impl Encoder<SapientMessage> for SapientCodec {
     }
 }
 
+impl Encoder<Vec<u8>> for SapientCodec {
+    type Error = SapientError;
+
+    fn encode(&mut self, payload: Vec<u8>, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let len = payload.len() as u32;
+        dst.reserve(4 + payload.len());
+        dst.put_u32_le(len);
+        dst.put_slice(&payload);
+        Ok(())
+    }
+}
+
 impl Decoder for SapientCodec {
     type Item = SapientMessage;
     type Error = SapientError;

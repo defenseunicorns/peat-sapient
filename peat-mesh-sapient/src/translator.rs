@@ -16,7 +16,13 @@ use async_trait::async_trait;
 use peat_mesh::sync::types::Document as MeshDocument;
 use peat_mesh::transport::{TranslationContext, Translator};
 use peat_sapient::mesh_fields::{platform_to_fields, track_to_fields};
-use peat_sapient::proto::{Content, SapientMessage};
+use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::detection_report::{
+    DetectionReportClassification, LocationOneof,
+};
+use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::{
+    Location as SapientLocation, LocationCoordinateSystem, LocationDatum,
+};
+use peat_sapient::proto::{Content, DetectionReport, SapientMessage};
 use peat_sapient::transform::{detection, registration, status};
 use peat_schema::capability::v1::CapabilityAdvertisement;
 use peat_schema::track::v1::TrackPosition;
@@ -87,19 +93,70 @@ impl Translator for SapientTranslator {
         SAPIENT_TRANSPORT_ID
     }
 
-    /// Always declines. SAPIENT has no wire message for "manager pushes a
-    /// track/status to a sensor" — `DetectionReport`/`StatusReport`/
-    /// `Registration` are strictly DLMM→HLDMM (see
-    /// `peat-sapient/docs/c2-collaboration.md`). Tasking is the direction
-    /// that *does* flow HLDMM→DLMM, but it's out of scope for this codec —
-    /// see `peat-sapient::bridge::SapientBridge::send_task` /
-    /// `task_queue::TaskQueue` for that path.
+    /// Encodes a mesh `tracks` document as a SAPIENT `DetectionReport`.
+    ///
+    /// Only the `tracks` collection is handled — `platforms` has no outbound
+    /// SAPIENT representation (there is no "push a platform to a sensor"
+    /// message in BSI Flex 335 v2.0). Returns `None` for non-tracks
+    /// collections and for documents missing required fields (`doc.id`,
+    /// `lat`, `lon`).
+    ///
+    /// In practice this runs in DLMM mode: the peat node acts as a virtual
+    /// sensor, forwarding mesh-originated tracks (e.g. from CoT/TAK) upstream
+    /// to a SAPIENT HLDMM as `DetectionReport`s.
     async fn encode_outbound(
         &self,
-        _doc: &MeshDocument,
-        _ctx: &TranslationContext,
+        doc: &MeshDocument,
+        ctx: &TranslationContext,
     ) -> Option<Vec<u8>> {
-        None
+        if ctx.collection.as_deref() != Some(TRACKS_COLLECTION) {
+            return None;
+        }
+        let object_id = doc.id.clone()?;
+        let lat = doc.fields.get("lat")?.as_f64()?;
+        let lon = doc.fields.get("lon")?.as_f64()?;
+        let hae = doc
+            .fields
+            .get("hae")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let mut classification = Vec::new();
+        if let Some(cls) = doc
+            .fields
+            .get("sapient_classification")
+            .and_then(|v| v.as_str())
+        {
+            let confidence = doc
+                .fields
+                .get("sapient_confidence")
+                .and_then(|v| v.as_f64())
+                .map(|c| c as f32);
+            classification.push(DetectionReportClassification {
+                r#type: Some(cls.to_string()),
+                confidence,
+                sub_class: vec![],
+            });
+        }
+
+        let msg = SapientMessage {
+            node_id: ctx.local_wire_id.clone(),
+            content: Some(Content::DetectionReport(DetectionReport {
+                object_id: Some(object_id),
+                location_oneof: Some(LocationOneof::Location(SapientLocation {
+                    x: Some(lon),
+                    y: Some(lat),
+                    z: Some(hae),
+                    coordinate_system: Some(LocationCoordinateSystem::LatLngDegM as i32),
+                    datum: Some(LocationDatum::Wgs84E as i32),
+                    ..Default::default()
+                })),
+                classification,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        Some(msg.encode_to_vec())
     }
 
     async fn decode_inbound(
@@ -159,8 +216,8 @@ impl Translator for SapientTranslator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peat_sapient::proto::sapient_msg::bsi_flex_335_v2_0::Location as SapientLocation;
-    use peat_sapient::proto::{DetectionReport, Registration, StatusReport};
+    use peat_sapient::proto::{Registration, StatusReport};
+    use serde_json::json;
 
     fn msg(node_id: &str, content: Content) -> SapientMessage {
         SapientMessage {
@@ -172,6 +229,19 @@ mod tests {
         }
     }
 
+    fn tracks_doc(id: &str, fields: serde_json::Map<String, serde_json::Value>) -> MeshDocument {
+        MeshDocument::with_id(id.to_string(), fields.into_iter().collect())
+    }
+
+    fn minimal_tracks_fields(lat: f64, lon: f64) -> serde_json::Map<String, serde_json::Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("lat".into(), json!(lat));
+        m.insert("lon".into(), json!(lon));
+        m
+    }
+
+    // --- transport_id ---
+
     #[tokio::test]
     async fn transport_id_is_sapient_static() {
         let t = SapientTranslator::new();
@@ -179,19 +249,141 @@ mod tests {
         assert_eq!(id, "sapient");
     }
 
+    // --- encode_outbound ---
+
     #[tokio::test]
-    async fn encode_outbound_always_declines() {
+    async fn encode_outbound_minimal_tracks_doc() {
         let t = SapientTranslator::new();
-        let doc = MeshDocument::with_id("any".to_string(), HashMap::new());
+        let doc = tracks_doc("trk-1", minimal_tracks_fields(51.5, -0.12));
         let ctx = TranslationContext::outbound().with_collection("tracks");
-        assert_eq!(t.encode_outbound(&doc, &ctx).await, None);
+        let bytes = t.encode_outbound(&doc, &ctx).await.unwrap();
+        let decoded = SapientMessage::decode(bytes.as_slice()).unwrap();
+        match decoded.content {
+            Some(Content::DetectionReport(dr)) => {
+                assert_eq!(dr.object_id.as_deref(), Some("trk-1"));
+                match dr.location_oneof {
+                    Some(LocationOneof::Location(loc)) => {
+                        assert_eq!(loc.y, Some(51.5)); // lat
+                        assert_eq!(loc.x, Some(-0.12)); // lon
+                        assert_eq!(loc.z, Some(0.0)); // hae default
+                    }
+                    _ => panic!("expected Location"),
+                }
+            }
+            _ => panic!("expected DetectionReport"),
+        }
     }
+
+    #[tokio::test]
+    async fn encode_outbound_with_hae() {
+        let t = SapientTranslator::new();
+        let mut fields = minimal_tracks_fields(34.05, -118.25);
+        fields.insert("hae".into(), json!(120.5));
+        let doc = tracks_doc("trk-2", fields);
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        let bytes = t.encode_outbound(&doc, &ctx).await.unwrap();
+        let decoded = SapientMessage::decode(bytes.as_slice()).unwrap();
+        match decoded.content {
+            Some(Content::DetectionReport(dr)) => match dr.location_oneof {
+                Some(LocationOneof::Location(loc)) => assert_eq!(loc.z, Some(120.5)),
+                _ => panic!("expected Location"),
+            },
+            _ => panic!("expected DetectionReport"),
+        }
+    }
+
+    #[tokio::test]
+    async fn encode_outbound_with_classification() {
+        let t = SapientTranslator::new();
+        let mut fields = minimal_tracks_fields(51.5, -0.12);
+        fields.insert("sapient_classification".into(), json!("vehicle"));
+        fields.insert("sapient_confidence".into(), json!(0.85));
+        let doc = tracks_doc("trk-3", fields);
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        let bytes = t.encode_outbound(&doc, &ctx).await.unwrap();
+        let decoded = SapientMessage::decode(bytes.as_slice()).unwrap();
+        match decoded.content {
+            Some(Content::DetectionReport(dr)) => {
+                assert_eq!(dr.classification.len(), 1);
+                assert_eq!(dr.classification[0].r#type.as_deref(), Some("vehicle"));
+                let conf = dr.classification[0].confidence.unwrap();
+                assert!((conf - 0.85).abs() < 0.001);
+            }
+            _ => panic!("expected DetectionReport"),
+        }
+    }
+
+    #[tokio::test]
+    async fn encode_outbound_missing_lat_declines() {
+        let t = SapientTranslator::new();
+        let mut fields = serde_json::Map::new();
+        fields.insert("lon".into(), json!(-0.12));
+        let doc = tracks_doc("trk-4", fields);
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        assert!(t.encode_outbound(&doc, &ctx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn encode_outbound_missing_lon_declines() {
+        let t = SapientTranslator::new();
+        let mut fields = serde_json::Map::new();
+        fields.insert("lat".into(), json!(51.5));
+        let doc = tracks_doc("trk-5", fields);
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        assert!(t.encode_outbound(&doc, &ctx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn encode_outbound_missing_doc_id_declines() {
+        let t = SapientTranslator::new();
+        let doc = MeshDocument::new(HashMap::from([
+            ("lat".into(), json!(51.5)),
+            ("lon".into(), json!(-0.12)),
+        ]));
+        let ctx = TranslationContext::outbound().with_collection("tracks");
+        assert!(t.encode_outbound(&doc, &ctx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn encode_outbound_non_tracks_collection_declines() {
+        let t = SapientTranslator::new();
+        let doc = tracks_doc("trk-6", minimal_tracks_fields(51.5, -0.12));
+        let ctx = TranslationContext::outbound().with_collection("platforms");
+        assert!(t.encode_outbound(&doc, &ctx).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn encode_outbound_sets_node_id_from_ctx() {
+        let t = SapientTranslator::new();
+        let doc = tracks_doc("trk-7", minimal_tracks_fields(51.5, -0.12));
+        let mut ctx = TranslationContext::outbound().with_collection("tracks");
+        ctx.local_wire_id = Some("dlmm-node-42".into());
+        let bytes = t.encode_outbound(&doc, &ctx).await.unwrap();
+        let decoded = SapientMessage::decode(bytes.as_slice()).unwrap();
+        assert_eq!(decoded.node_id.as_deref(), Some("dlmm-node-42"));
+    }
+
+    #[tokio::test]
+    async fn encode_decode_round_trip_preserves_position() {
+        let t = SapientTranslator::new();
+        let doc = tracks_doc("rt-1", minimal_tracks_fields(34.05, -118.25));
+        let ctx_out = TranslationContext::outbound().with_collection("tracks");
+        let bytes = t.encode_outbound(&doc, &ctx_out).await.unwrap();
+
+        let ctx_in = TranslationContext::inbound("peer-1");
+        let decoded_doc = t.decode_inbound(&bytes, &ctx_in).await.unwrap().unwrap();
+        let lat = decoded_doc.fields.get("lat").unwrap().as_f64().unwrap();
+        let lon = decoded_doc.fields.get("lon").unwrap().as_f64().unwrap();
+        assert!((lat - 34.05).abs() < 1e-6);
+        assert!((lon - (-118.25)).abs() < 1e-6);
+    }
+
+    // --- decode_inbound ---
 
     #[tokio::test]
     async fn decode_inbound_declines_unrecognized_content_ok_none() {
         let t = SapientTranslator::new();
         let ctx = TranslationContext::inbound("peer-1");
-        // Content::Error has no mapping in this codec — well-formed, not carried.
         let raw = msg(
             "node-1",
             Content::Error(peat_sapient::proto::SapientProtoError {
