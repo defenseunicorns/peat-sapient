@@ -4,7 +4,7 @@
 //!
 //! The shared `tracks` schema contract:
 //! - `lat` (f64), `lon` (f64), `doc.id` (String) — minimum viable interop
-//! - `hae` (f64, optional), `timestamp_ms` (number, optional)
+//! - `hae` (f64, optional), `timestamp_ms` (i64 millis, optional)
 //! - `cot_type` (String) — CoT-specific, SAPIENT ignores on encode
 //! - `callsign` (String) — CoT-specific, SAPIENT ignores on encode
 //! - `tak_origin` (bool) — CoT-specific origin marker
