@@ -280,10 +280,23 @@ async fn full_dlmm_lifecycle_lands_in_correct_collections() {
     .await
     .expect("send detection");
 
+    // Poll tracks first: DetectionReport is the last message sent, so once
+    // it lands both prior platforms writes (Registration, StatusReport) are
+    // guaranteed to have been processed by the sequential recv loop.
+    let tracks = poll_collection(&node, "tracks", 1).await;
+    assert_eq!(
+        tracks.len(),
+        1,
+        "expected exactly one tracks document to land"
+    );
+    assert_eq!(
+        tracks[0].fields.get("lat").and_then(|v| v.as_f64()),
+        Some(48.8570)
+    );
+
     // platforms: Registration and StatusReport both map to the same node_id
-    // document, so there should be exactly 1 platforms document (the
-    // StatusReport updates the Registration's document in-place via
-    // peat-mesh's field-level LWW merge).
+    // document (field-level LWW merge). Now safe to assert lat — the tracks
+    // poll above guarantees both platform writes have been processed.
     let platforms = poll_collection(&node, "platforms", 1).await;
     assert!(
         !platforms.is_empty(),
@@ -294,17 +307,5 @@ async fn full_dlmm_lifecycle_lands_in_correct_collections() {
         platforms[0].fields.get("lat").and_then(|v| v.as_f64()),
         Some(48.8566),
         "StatusReport position should be reflected in platforms document"
-    );
-
-    // tracks: DetectionReport lands as a separate collection.
-    let tracks = poll_collection(&node, "tracks", 1).await;
-    assert_eq!(
-        tracks.len(),
-        1,
-        "expected exactly one tracks document to land"
-    );
-    assert_eq!(
-        tracks[0].fields.get("lat").and_then(|v| v.as_f64()),
-        Some(48.8570)
     );
 }
