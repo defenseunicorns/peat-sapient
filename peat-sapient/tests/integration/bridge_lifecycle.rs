@@ -20,15 +20,10 @@ use peat_schema::command::v1::{
     HierarchicalCommand, MissionOrder,
 };
 
-fn free_port() -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    l.local_addr().unwrap().port()
-}
-
-fn bridge_config(port: u16) -> BridgeConfig {
+fn bridge_config() -> BridgeConfig {
     BridgeConfig {
         node_id: "hldmm-test-uuid".into(),
-        addr: format!("127.0.0.1:{port}").parse().unwrap(),
+        addr: "127.0.0.1:0".parse().unwrap(),
         detection_rate_limit: None,
         heartbeat_interval: Duration::from_secs(30),
         task_queue_depth: 8,
@@ -72,14 +67,9 @@ fn registration_msg(node_id: &str) -> SapientMessage {
 /// `Registered` and the DLMM receives a `RegistrationAck`.
 #[tokio::test]
 async fn bridge_accepts_connection_and_sends_registration_ack() {
-    let port = free_port();
-    let (bridge, mut updates) = SapientBridge::new(bridge_config(port));
-    bridge.start().await.unwrap();
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
 
-    // Give the listener task a tick to start.
-    tokio::task::yield_now().await;
-
-    let addr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
         .await
         .unwrap();
@@ -113,12 +103,9 @@ async fn bridge_accepts_connection_and_sends_registration_ack() {
 /// `send_task` delivers a `Task` to a connected DLMM and the DLMM can read it.
 #[tokio::test]
 async fn bridge_delivers_task_to_connected_dlmm() {
-    let port = free_port();
-    let (bridge, mut updates) = SapientBridge::new(bridge_config(port));
-    bridge.start().await.unwrap();
-    tokio::task::yield_now().await;
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
 
-    let addr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
         .await
         .unwrap();
@@ -137,7 +124,10 @@ async fn bridge_delivers_task_to_connected_dlmm() {
 
     // HLDMM sends a task.
     let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
-    bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, None)
+        .await
+        .unwrap();
 
     // DLMM should receive the Task.
     let received = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm))
@@ -156,17 +146,17 @@ async fn bridge_delivers_task_to_connected_dlmm() {
 /// Tasks enqueued before the DLMM connects are replayed when it registers.
 #[tokio::test]
 async fn bridge_replays_queued_task_on_dlmm_connect() {
-    let port = free_port();
-    let (bridge, mut updates) = SapientBridge::new(bridge_config(port));
-    bridge.start().await.unwrap();
-    tokio::task::yield_now().await;
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
 
     // Enqueue a task BEFORE the DLMM connects.
     let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
-    bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, None)
+        .await
+        .unwrap();
 
     // Now the DLMM connects and registers.
-    let addr = format!("127.0.0.1:{port}").parse().unwrap();
     let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
         .await
         .unwrap();
@@ -196,12 +186,8 @@ async fn bridge_replays_queued_task_on_dlmm_connect() {
 /// After `TaskAck::Accepted`, a disconnect + reconnect does NOT replay the task.
 #[tokio::test]
 async fn task_ack_prevents_replay_on_reconnect() {
-    let port = free_port();
-    let (bridge, mut updates) = SapientBridge::new(bridge_config(port));
-    bridge.start().await.unwrap();
-    tokio::task::yield_now().await;
-
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
 
     // --- First connection: register, receive task, send TaskAck ---
     {
@@ -224,7 +210,10 @@ async fn task_ack_prevents_replay_on_reconnect() {
             Some(Content::Task(t)) => t.task_id.clone().unwrap(),
             _ => panic!("expected Task content"),
         };
-        bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+        bridge
+            .send_task("dlmm-test-uuid", task_msg, None)
+            .await
+            .unwrap();
 
         // DLMM receives Task.
         let received = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm))
@@ -279,18 +268,17 @@ async fn task_ack_prevents_replay_on_reconnect() {
 /// A task whose TTL expires before reconnect is NOT replayed.
 #[tokio::test(start_paused = true)]
 async fn expired_task_is_not_replayed_on_reconnect() {
-    let port = free_port();
-    let mut config = bridge_config(port);
+    let mut config = bridge_config();
     config.task_ttl = Duration::from_secs(5); // short TTL for this test
     let (bridge, mut updates) = SapientBridge::new(config);
-    bridge.start().await.unwrap();
-    tokio::task::yield_now().await;
-
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let addr = bridge.start().await.unwrap();
 
     // Enqueue task before DLMM connects.
     let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &isr_command()).unwrap();
-    bridge.send_task("dlmm-test-uuid", task_msg).await.unwrap();
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, None)
+        .await
+        .unwrap();
 
     // Advance time past the TTL.
     tokio::time::advance(Duration::from_secs(6)).await;
@@ -314,4 +302,154 @@ async fn expired_task_is_not_replayed_on_reconnect() {
         timeout_result.is_err(),
         "expired task should not be replayed"
     );
+}
+
+/// After TTL expiry, the `task_commands` correlation entry is reaped: a
+/// TaskAck for the expired task_id carries `command_id: None`.
+#[tokio::test]
+async fn expired_task_reaps_command_id_correlation() {
+    let mut config = bridge_config();
+    config.task_ttl = Duration::from_millis(100);
+    let (bridge, mut updates) = SapientBridge::new(config);
+    let addr = bridge.start().await.unwrap();
+
+    // Enqueue task with a command_id before DLMM connects.
+    let cmd = isr_command();
+    let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &cmd).unwrap();
+    let task_id = match &task_msg.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("expected Task content"),
+    };
+    bridge
+        .send_task(
+            "dlmm-test-uuid",
+            task_msg,
+            Some("cmd-should-be-reaped".into()),
+        )
+        .await
+        .unwrap();
+
+    // Wait past TTL so the task expires.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // DLMM connects — expired task is not replayed, and drain_expired
+    // cleans up the task_commands entry.
+    let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+    connection::send(&mut dlmm, registration_msg("dlmm-test-uuid"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered
+
+    // Now send a TaskAck for the expired task_id — the bridge should
+    // emit TaskAcknowledged with command_id: None (reaped, not orphaned).
+    connection::send(
+        &mut dlmm,
+        SapientMessage {
+            node_id: Some("dlmm-test-uuid".into()),
+            content: Some(Content::TaskAck(TaskAck {
+                task_id: Some(task_id),
+                task_status: Some(task_ack::TaskStatus::Accepted as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+    if let SapientUpdate::TaskAcknowledged {
+        command_id: recv_cmd_id,
+        ..
+    } = update
+    {
+        assert_eq!(
+            recv_cmd_id, None,
+            "expired task's command_id should have been reaped"
+        );
+    } else {
+        panic!("expected TaskAcknowledged, got {update:?}");
+    }
+}
+
+/// When `send_task` is called with a `command_id`, the resulting
+/// `TaskAcknowledged` carries that `command_id` for upstream correlation.
+#[tokio::test]
+async fn task_ack_carries_command_id() {
+    let (bridge, mut updates) = SapientBridge::new(bridge_config());
+    let addr = bridge.start().await.unwrap();
+
+    let mut dlmm = connection::connect_with_retry(addr, &connection::ReconnectConfig::default())
+        .await
+        .unwrap();
+
+    connection::send(&mut dlmm, registration_msg("dlmm-test-uuid"))
+        .await
+        .unwrap();
+    connection::recv(&mut dlmm).await.unwrap(); // RegistrationAck
+    tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .unwrap(); // Registered
+
+    let cmd = isr_command();
+    let command_id = cmd.command_id.clone();
+    let task_msg = to_task("hldmm-test-uuid", "dlmm-test-uuid", &cmd).unwrap();
+    let task_id = match &task_msg.content {
+        Some(Content::Task(t)) => t.task_id.clone().unwrap(),
+        _ => panic!("expected Task content"),
+    };
+    bridge
+        .send_task("dlmm-test-uuid", task_msg, Some(command_id.clone()))
+        .await
+        .unwrap();
+
+    // DLMM receives Task.
+    tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut dlmm))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // DLMM sends TaskAck.
+    connection::send(
+        &mut dlmm,
+        SapientMessage {
+            node_id: Some("dlmm-test-uuid".into()),
+            content: Some(Content::TaskAck(TaskAck {
+                task_id: Some(task_id),
+                task_status: Some(task_ack::TaskStatus::Accepted as i32),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Bridge should emit TaskAcknowledged with our command_id.
+    let update = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .expect("timeout")
+        .expect("channel closed");
+    if let SapientUpdate::TaskAcknowledged {
+        command_id: recv_cmd_id,
+        ..
+    } = update
+    {
+        assert_eq!(
+            recv_cmd_id.as_deref(),
+            Some(command_id.as_str()),
+            "TaskAcknowledged should carry the originating command_id"
+        );
+    } else {
+        panic!("expected TaskAcknowledged, got {update:?}");
+    }
 }

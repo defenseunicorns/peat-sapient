@@ -50,24 +50,35 @@ impl TaskQueue {
     /// Enqueue a `SapientMessage` carrying a `Task` for `node_id`.
     ///
     /// If the per-node queue is already at `max_depth`, the oldest pending task
-    /// is evicted with a warning before the new task is added.
-    pub fn enqueue(&mut self, node_id: &str, task_id: String, msg: SapientMessage) {
+    /// is evicted with a warning before the new task is added. Returns the
+    /// `task_id` of the evicted task, if any, so callers can clean up
+    /// associated state (e.g. command_id correlation).
+    pub fn enqueue(
+        &mut self,
+        node_id: &str,
+        task_id: String,
+        msg: SapientMessage,
+    ) -> Option<String> {
         let queue = self.queues.entry(node_id.to_string()).or_default();
-        if queue.len() >= self.max_depth {
-            if let Some(dropped) = queue.pop_front() {
+        let evicted = if queue.len() >= self.max_depth {
+            queue.pop_front().map(|dropped| {
                 warn!(
                     node_id = %node_id,
                     dropped_task_id = %dropped.task_id,
                     "DIL task queue full — evicted oldest pending task"
                 );
-            }
-        }
+                dropped.task_id
+            })
+        } else {
+            None
+        };
         queue.push_back(QueuedTask {
             msg,
             task_id,
             enqueued_at: Instant::now(),
             ttl: self.default_ttl,
         });
+        evicted
     }
 
     /// Acknowledge a task — remove it from the queue.
@@ -82,10 +93,13 @@ impl TaskQueue {
 
     /// Expire and discard tasks whose TTL has elapsed.
     ///
-    /// Each expired task produces a `warn!` log entry. Call this before
-    /// `pending_for` on reconnect and periodically in the bridge loop.
-    pub fn drain_expired(&mut self) {
+    /// Each expired task produces a `warn!` log entry. Returns the `task_id`s
+    /// of all expired tasks so callers can clean up associated state (e.g.
+    /// command_id correlation). Call this before `pending_for` on reconnect
+    /// and periodically in the bridge loop.
+    pub fn drain_expired(&mut self) -> Vec<String> {
         let now = Instant::now();
+        let mut expired_ids = Vec::new();
         for (node_id, queue) in &mut self.queues {
             queue.retain(|t| {
                 if now.duration_since(t.enqueued_at) > t.ttl {
@@ -95,12 +109,14 @@ impl TaskQueue {
                         ttl = ?t.ttl,
                         "queued task TTL expired — discarding without replay"
                     );
+                    expired_ids.push(t.task_id.clone());
                     false
                 } else {
                     true
                 }
             });
         }
+        expired_ids
     }
 
     /// Return clones of all pending (non-expired) tasks for `node_id` in
@@ -225,6 +241,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enqueue_returns_evicted_task_id() {
+        let mut q = TaskQueue::new(2, Duration::from_secs(60));
+        assert_eq!(
+            q.enqueue("node-1", "task-a".into(), task_msg("task-a")),
+            None
+        );
+        assert_eq!(
+            q.enqueue("node-1", "task-b".into(), task_msg("task-b")),
+            None
+        );
+        assert_eq!(
+            q.enqueue("node-1", "task-c".into(), task_msg("task-c")),
+            Some("task-a".to_string()),
+            "enqueue must return the evicted task_id"
+        );
+    }
+
+    #[tokio::test]
     async fn is_empty_for_unknown_node_returns_true() {
         let q = TaskQueue::new(10, Duration::from_secs(60));
         assert!(q.is_empty_for("ghost"));
@@ -258,6 +292,22 @@ mod tests {
         q.drain_expired();
 
         assert!(q.is_empty_for("node-1"), "stale task should be expired");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn drain_expired_returns_expired_task_ids() {
+        let mut q = TaskQueue::new(10, Duration::from_secs(30));
+        q.enqueue("node-1", "task-old-a".into(), task_msg("task-old-a"));
+        q.enqueue("node-1", "task-old-b".into(), task_msg("task-old-b"));
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let expired = q.drain_expired();
+
+        assert_eq!(
+            expired,
+            vec!["task-old-a".to_string(), "task-old-b".to_string()],
+            "drain_expired must return the task_ids of all expired tasks"
+        );
     }
 
     #[tokio::test(start_paused = true)]

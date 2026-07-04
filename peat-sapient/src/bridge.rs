@@ -120,6 +120,10 @@ pub enum SapientUpdate {
     TaskAcknowledged {
         node_id: String,
         task_id: String,
+        /// The peat `command_id` that produced this task, if the task was sent
+        /// via `send_task` with a `command_id`. Consumers use this to construct
+        /// a `CommandAcknowledgment` for the originating hierarchy level.
+        command_id: Option<String>,
         status: TaskAckStatus,
         reasons: Vec<String>,
     },
@@ -159,6 +163,9 @@ struct BridgeInner {
     connections: Mutex<HashMap<String, mpsc::Sender<SapientMessage>>>,
     /// Per-node DIL outbound task queue.
     task_queue: Mutex<TaskQueue>,
+    /// `task_id` → originating peat `command_id`, for correlating `TaskAck`
+    /// back to the `HierarchicalCommand` that produced the task.
+    task_commands: Mutex<HashMap<String, String>>,
     /// Registry of all registered (connected) SAPIENT nodes.
     registry: NodeRegistry,
     /// Emits `SapientUpdate` events to the application receive loop.
@@ -183,6 +190,7 @@ impl SapientBridge {
         let inner = Arc::new(BridgeInner {
             detection_limiter,
             task_queue,
+            task_commands: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             registry: new_registry(),
             update_tx,
@@ -194,15 +202,19 @@ impl SapientBridge {
     /// Start the bridge in HLDMM mode: bind `config.addr` and accept incoming
     /// DLMM connections. Each connection is handled in a dedicated tokio task.
     ///
-    /// Returns immediately after spawning the accept loop. Returns `Err` if the
-    /// TCP bind fails (e.g. address already in use).
-    pub async fn start(&self) -> Result<(), SapientError> {
+    /// Returns the actual bound address after spawning the accept loop. When
+    /// `config.addr` uses port `0`, the OS assigns an ephemeral port — use
+    /// the returned address to connect. Returns `Err` if the TCP bind fails.
+    pub async fn start(&self) -> Result<std::net::SocketAddr, SapientError> {
         let listener = TcpListener::bind(self.inner.config.addr)
             .await
             .map_err(|e| {
                 SapientError::ConnectionFailed(format!("bind {}: {e}", self.inner.config.addr))
             })?;
-        info!(addr = %self.inner.config.addr, "SAPIENT HLDMM listening");
+        let bound_addr = listener
+            .local_addr()
+            .map_err(|e| SapientError::ConnectionFailed(format!("local_addr: {e}")))?;
+        info!(addr = %bound_addr, "SAPIENT HLDMM listening");
 
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
@@ -218,7 +230,7 @@ impl SapientBridge {
             }
         });
 
-        Ok(())
+        Ok(bound_addr)
     }
 
     /// Enqueue a `SapientMessage` carrying a `Task` for delivery to `node_id`.
@@ -228,15 +240,43 @@ impl SapientBridge {
     /// a `TaskAck` is received; if the DLMM disconnects before acknowledging,
     /// the task is replayed on the next reconnect (unless its TTL has elapsed).
     ///
+    /// `command_id` — the peat `HierarchicalCommand.command_id` that produced
+    /// this task. When the DLMM sends a `TaskAck`, the resulting
+    /// `TaskAcknowledged` update will carry this value so consumers can
+    /// construct a `CommandAcknowledgment` for the originating hierarchy level.
+    /// Pass `None` when the task doesn't originate from a peat command.
+    ///
     /// Returns `Err` if the message does not carry a `Task` with a non-empty
     /// `task_id`.
-    pub async fn send_task(&self, node_id: &str, msg: SapientMessage) -> Result<(), SapientError> {
+    pub async fn send_task(
+        &self,
+        node_id: &str,
+        msg: SapientMessage,
+        command_id: Option<String>,
+    ) -> Result<(), SapientError> {
         let task_id = extract_task_id(&msg)?;
+
+        if let Some(ref cmd_id) = command_id {
+            self.inner
+                .task_commands
+                .lock()
+                .await
+                .insert(task_id.clone(), cmd_id.clone());
+        }
 
         {
             let mut q = self.inner.task_queue.lock().await;
-            q.drain_expired();
-            q.enqueue(node_id, task_id, msg.clone());
+            let expired = q.drain_expired();
+            let evicted = q.enqueue(node_id, task_id, msg.clone());
+            if !expired.is_empty() || evicted.is_some() {
+                let mut cmds = self.inner.task_commands.lock().await;
+                for id in expired {
+                    cmds.remove(&id);
+                }
+                if let Some(id) = evicted {
+                    cmds.remove(&id);
+                }
+            }
         }
 
         // If the node is connected, send immediately. Errors are intentionally
@@ -354,7 +394,13 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
 
             let pending = {
                 let mut q = inner.task_queue.lock().await;
-                q.drain_expired();
+                let expired = q.drain_expired();
+                if !expired.is_empty() {
+                    let mut cmds = inner.task_commands.lock().await;
+                    for id in expired {
+                        cmds.remove(&id);
+                    }
+                }
                 q.pending_for(&msg_node_id)
             };
             for task_msg in pending {
@@ -365,7 +411,7 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
         // Route the message and emit a SapientUpdate.
         let sensor_pos = get_position(&inner.registry, &msg_node_id).await;
         match route_message(msg, sensor_pos.as_ref(), inner.detection_limiter.as_ref()) {
-            Ok(update) => {
+            Ok(mut update) => {
                 match &update {
                     SapientUpdate::Registered {
                         node_id,
@@ -399,6 +445,15 @@ async fn run_connection(stream: TcpStream, inner: Arc<BridgeInner>) {
                         }
                     }
                     _ => {}
+                }
+                // Enrich TaskAcknowledged with the originating command_id.
+                if let SapientUpdate::TaskAcknowledged {
+                    ref task_id,
+                    ref mut command_id,
+                    ..
+                } = update
+                {
+                    *command_id = inner.task_commands.lock().await.remove(task_id);
                 }
                 inner.update_tx.send(update).await.ok();
             }
@@ -527,6 +582,7 @@ pub fn route_message(
             Ok(SapientUpdate::TaskAcknowledged {
                 node_id,
                 task_id,
+                command_id: None,
                 status,
                 reasons: ack.reason,
             })
