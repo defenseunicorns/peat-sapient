@@ -27,13 +27,15 @@ use tokio::sync::Mutex;
 
 use peat_mesh::transport::OutboundSink;
 
+type CapturedMessages = Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>>;
+
 struct CaptureSink {
-    received: Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>>,
+    received: CapturedMessages,
 }
 
 impl CaptureSink {
-    fn new() -> (Self, Arc<Mutex<Vec<(Vec<u8>, Option<String>)>>>) {
-        let received = Arc::new(Mutex::new(Vec::new()));
+    fn new() -> (Self, CapturedMessages) {
+        let received: CapturedMessages = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
                 received: received.clone(),
