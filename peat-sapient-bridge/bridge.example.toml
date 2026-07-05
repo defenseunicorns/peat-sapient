@@ -2,6 +2,12 @@
 #
 # CLI flags override any value set here.
 # Run with: peat-sapient-bridge --config bridge.toml
+#
+# Known advisory: the TAK CoT XML path uses quick-xml < 0.41.0, which is
+# vulnerable to quadratic attribute-name dedup (RUSTSEC-2026-0194) and
+# unbounded namespace allocation (RUSTSEC-2026-0195). Both are DoS vectors
+# on untrusted XML input. Mitigated once peat-protocol upgrades peat-schema
+# to quick-xml >= 0.41.0. Tracked in https://github.com/defenseunicorns/peat/issues/1012
 
 [node]
 # Friendly name — also used as the iroh identity seed (same name = same NodeId).

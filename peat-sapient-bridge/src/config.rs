@@ -38,9 +38,9 @@ pub struct Cli {
     #[arg(long)]
     pub sapient_peer_id: Option<String>,
 
-    /// Use TLS for the SAPIENT connection (DLMM↔HLDMM).
-    #[arg(long)]
-    pub sapient_tls: bool,
+    /// Enable or disable TLS for the SAPIENT connection (overrides config file).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_parser = clap::value_parser!(bool))]
+    pub sapient_tls: Option<bool>,
 
     /// Server/client certificate PEM for SAPIENT TLS.
     #[arg(long)]
@@ -66,9 +66,9 @@ pub struct Cli {
     #[arg(long)]
     pub tak_server: Option<SocketAddr>,
 
-    /// Use TLS for the TAK Server connection.
-    #[arg(long)]
-    pub tak_tls: bool,
+    /// Enable or disable TLS for the TAK Server connection (overrides config file).
+    #[arg(long, num_args = 0..=1, default_missing_value = "true", value_parser = clap::value_parser!(bool))]
+    pub tak_tls: Option<bool>,
 
     /// Client certificate PEM for TAK mTLS.
     #[arg(long)]
@@ -199,8 +199,8 @@ impl Config {
         if let Some(id) = &cli.sapient_peer_id {
             config.sapient.peer_node_id = Some(id.clone());
         }
-        if cli.sapient_tls {
-            config.sapient.tls = Some(true);
+        if let Some(tls) = cli.sapient_tls {
+            config.sapient.tls = Some(tls);
         }
         if let Some(ref path) = cli.sapient_cert {
             config.sapient.cert = Some(path.clone());
@@ -217,8 +217,8 @@ impl Config {
         if let Some(addr) = cli.tak_server {
             config.tak.server = Some(addr);
         }
-        if cli.tak_tls {
-            config.tak.tls = Some(true);
+        if let Some(tls) = cli.tak_tls {
+            config.tak.tls = Some(tls);
         }
         if let Some(ref path) = cli.tak_cert {
             config.tak.client_cert = Some(path.clone());

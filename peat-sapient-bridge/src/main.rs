@@ -305,3 +305,138 @@ fn base64_default_key() -> String {
     rand::thread_rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_peer_valid() {
+        let id = "a".repeat(64);
+        let spec = format!("{id}@127.0.0.1:9001");
+        let (parsed_id, addrs) = parse_peer(&spec).unwrap();
+        assert_eq!(parsed_id, id);
+        assert_eq!(addrs, vec!["127.0.0.1:9001"]);
+    }
+
+    #[test]
+    fn parse_peer_missing_at() {
+        assert!(parse_peer("no-at-sign").is_err());
+    }
+
+    #[test]
+    fn parse_peer_bad_hex() {
+        let spec = format!("{}@127.0.0.1:9001", "zz".repeat(32));
+        assert!(parse_peer(&spec).is_err());
+    }
+
+    #[test]
+    fn parse_peer_wrong_length() {
+        let short = "aa".repeat(16);
+        let spec = format!("{short}@127.0.0.1:9001");
+        let err = parse_peer(&spec).unwrap_err();
+        assert!(err.to_string().contains("16 bytes"));
+    }
+
+    #[test]
+    fn parse_peer_bad_addr() {
+        let id = "bb".repeat(32);
+        let spec = format!("{id}@not-an-address");
+        assert!(parse_peer(&spec).is_err());
+    }
+
+    #[test]
+    fn resolve_role_default_is_hldmm() {
+        let cfg = config::SapientConfig::default();
+        let role = resolve_sapient_role(&cfg).unwrap();
+        assert!(matches!(role, SapientRole::Hldmm { .. }));
+    }
+
+    #[test]
+    fn resolve_role_hldmm_explicit() {
+        let cfg = config::SapientConfig {
+            role: Some("hldmm".into()),
+            listen: Some("0.0.0.0:5000".parse().unwrap()),
+            ..Default::default()
+        };
+        match resolve_sapient_role(&cfg).unwrap() {
+            SapientRole::Hldmm { listen_addr } => {
+                assert_eq!(listen_addr, "0.0.0.0:5000".parse::<SocketAddr>().unwrap())
+            }
+            _ => panic!("expected HLDMM"),
+        }
+    }
+
+    #[test]
+    fn resolve_role_dlmm() {
+        let cfg = config::SapientConfig {
+            role: Some("dlmm".into()),
+            remote: Some("10.0.0.1:12000".parse().unwrap()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            resolve_sapient_role(&cfg).unwrap(),
+            SapientRole::Dlmm { .. }
+        ));
+    }
+
+    #[test]
+    fn resolve_role_dlmm_missing_remote() {
+        let cfg = config::SapientConfig {
+            role: Some("dlmm".into()),
+            ..Default::default()
+        };
+        assert!(resolve_sapient_role(&cfg).is_err());
+    }
+
+    #[test]
+    fn resolve_role_unknown() {
+        let cfg = config::SapientConfig {
+            role: Some("bogus".into()),
+            ..Default::default()
+        };
+        assert!(resolve_sapient_role(&cfg).is_err());
+    }
+
+    #[test]
+    fn config_cli_tls_overrides_file_on() {
+        let mut config = Config::default();
+        config.sapient.tls = Some(true);
+        let cli = Cli::parse_from(["test", "--sapient-tls=false"]);
+        let loaded = Config::load(&cli).unwrap();
+        assert_eq!(loaded.sapient.tls, Some(false));
+    }
+
+    #[test]
+    fn config_cli_tls_overrides_file_off() {
+        let cli = Cli::parse_from(["test", "--sapient-tls"]);
+        let loaded = Config::load(&cli).unwrap();
+        assert_eq!(loaded.sapient.tls, Some(true));
+    }
+
+    #[test]
+    fn config_cli_tak_tls_overrides() {
+        let cli = Cli::parse_from(["test", "--tak-tls=false"]);
+        let loaded = Config::load(&cli).unwrap();
+        assert_eq!(loaded.tak.tls, Some(false));
+    }
+
+    #[test]
+    fn config_no_tls_flags_leaves_none() {
+        let cli = Cli::parse_from(["test"]);
+        let loaded = Config::load(&cli).unwrap();
+        assert_eq!(loaded.sapient.tls, None);
+        assert_eq!(loaded.tak.tls, None);
+    }
+
+    #[test]
+    fn base64_default_key_is_valid() {
+        use base64::Engine;
+        let key = base64_default_key();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&key)
+            .unwrap();
+        assert_eq!(decoded.len(), 32);
+        assert_ne!(decoded, vec![0u8; 32]);
+    }
+}
