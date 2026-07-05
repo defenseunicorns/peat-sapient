@@ -1,0 +1,7 @@
+[advisories]
+# quick-xml DoS vulnerabilities — transitive dep via peat-protocol/peat-schema;
+# fix is upstream (quick-xml >= 0.41.0). Tracked in peat#1012.
+ignore = [
+    "RUSTSEC-2026-0194",  # quadratic attribute-name dedup
+    "RUSTSEC-2026-0195",  # unbounded namespace allocation
+]
