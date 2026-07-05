@@ -41,6 +41,18 @@ pub struct Cli {
     /// Persistence directory. Defaults to a tempdir.
     #[arg(long)]
     pub storage: Option<PathBuf>,
+
+    /// TAK Server address (host:port). Enables TAK transport when set.
+    #[arg(long)]
+    pub tak_server: Option<SocketAddr>,
+
+    /// Use TLS for the TAK Server connection.
+    #[arg(long)]
+    pub tak_tls: bool,
+
+    /// Mesh-side node ID for the TAK Server peer.
+    #[arg(long, default_value = "tak-server-0")]
+    pub tak_peer_id: String,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -51,6 +63,8 @@ pub struct Config {
     pub mesh: MeshConfig,
     #[serde(default)]
     pub sapient: SapientConfig,
+    #[serde(default)]
+    pub tak: TakConfig,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -80,6 +94,16 @@ pub struct SapientConfig {
     /// Remote HLDMM address for DLMM mode.
     pub remote: Option<SocketAddr>,
     /// Peer node ID for DLMM mode.
+    pub peer_node_id: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+pub struct TakConfig {
+    /// TAK Server address (host:port).
+    pub server: Option<SocketAddr>,
+    /// Use TLS for the TAK Server connection.
+    pub tls: Option<bool>,
+    /// Mesh-side node ID for the TAK Server peer.
     pub peer_node_id: Option<String>,
 }
 
@@ -115,6 +139,16 @@ impl Config {
         if let Some(id) = &cli.sapient_peer_id {
             config.sapient.peer_node_id = Some(id.clone());
         }
+        if let Some(addr) = cli.tak_server {
+            config.tak.server = Some(addr);
+        }
+        if cli.tak_tls {
+            config.tak.tls = Some(true);
+        }
+        config
+            .tak
+            .peer_node_id
+            .get_or_insert(cli.tak_peer_id.clone());
 
         Ok(config)
     }

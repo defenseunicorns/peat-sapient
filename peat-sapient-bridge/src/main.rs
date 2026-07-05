@@ -13,6 +13,7 @@ use peat_mesh::transport::{
 };
 use peat_mesh::Node;
 use peat_mesh_sapient::{PeatSapientTransport, SapientRole, SapientTranslator};
+use peat_tak::{CotTranslator, PeatTakTransport, TakMeshConfig};
 use tracing::{error, info};
 
 use crate::config::{Cli, Config};
@@ -40,7 +41,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "warn,peat_sapient_bridge=info,peat_mesh_sapient=info,peat_sapient=info".into()
+                "warn,peat_sapient_bridge=info,peat_mesh_sapient=info,peat_sapient=info,peat_tak=info".into()
             }),
         )
         .init();
@@ -134,11 +135,38 @@ async fn main() -> Result<()> {
     transport.start().await.context("start SAPIENT transport")?;
     info!("sapient: started ({:?})", role_summary(&sapient_role));
 
+    // -- TAK transport (optional) --
+    let tak_transport = if let Some(server_addr) = config.tak.server {
+        let tak_translator = Arc::new(CotTranslator::new());
+        let tak_peer_id = config.tak.peer_node_id.as_deref().unwrap_or("tak-server-0");
+        let tak_config = TakMeshConfig {
+            server_addr,
+            peer_node_id: NodeId::from(tak_peer_id),
+            use_tls: config.tak.tls.unwrap_or(false),
+        };
+        let t = PeatTakTransport::new(tak_config, node.clone(), tak_translator.clone());
+        let tak_sink = t.outbound_sink();
+        t.start().await.context("start TAK transport")?;
+        info!("tak: started (server={})", server_addr);
+        Some((t, tak_translator, tak_sink))
+    } else {
+        None
+    };
+
     // -- TransportManager fan-out --
     let mgr = Arc::new(TransportManager::new(TransportManagerConfig::default()));
     mgr.register_translator(translator, sink, TranslatorRegistrationConfig::default())
         .await
         .context("register SAPIENT translator")?;
+    if let Some((_, ref tak_translator, ref tak_sink)) = tak_transport {
+        mgr.register_translator(
+            tak_translator.clone(),
+            tak_sink.clone(),
+            TranslatorRegistrationConfig::default(),
+        )
+        .await
+        .context("register TAK translator")?;
+    }
     let _fanout_handle = mgr
         .start_fanout(node.clone(), vec!["tracks".to_string()])
         .context("start fan-out")?;
@@ -147,6 +175,9 @@ async fn main() -> Result<()> {
     // -- Wait for shutdown --
     tokio::signal::ctrl_c().await?;
     info!("shutting down");
+    if let Some((ref tak, _, _)) = tak_transport {
+        tak.stop().await.ok();
+    }
     transport.stop().await.ok();
 
     Ok(())
