@@ -11,6 +11,10 @@ description = "Bidirectional SAPIENT ↔ mesh bridge service — connects BSI Fl
 name = "peat-sapient-bridge"
 path = "src/main.rs"
 
+[features]
+default = ["tls"]
+tls = ["peat-sapient/tls", "peat-mesh-sapient/tls"]
+
 [dependencies]
 peat-mesh = { version = "0.9.0-rc.41", features = ["automerge-backend"] }
 peat-mesh-sapient = { path = "../peat-mesh-sapient" }

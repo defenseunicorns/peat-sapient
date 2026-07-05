@@ -38,6 +38,26 @@ pub struct Cli {
     #[arg(long)]
     pub sapient_peer_id: Option<String>,
 
+    /// Use TLS for the SAPIENT connection (DLMM↔HLDMM).
+    #[arg(long)]
+    pub sapient_tls: bool,
+
+    /// Server/client certificate PEM for SAPIENT TLS.
+    #[arg(long)]
+    pub sapient_cert: Option<PathBuf>,
+
+    /// Private key PEM for SAPIENT TLS.
+    #[arg(long)]
+    pub sapient_key: Option<PathBuf>,
+
+    /// CA certificate PEM for SAPIENT TLS peer verification.
+    #[arg(long)]
+    pub sapient_ca_cert: Option<PathBuf>,
+
+    /// TLS server name for SAPIENT SNI (DLMM mode only).
+    #[arg(long)]
+    pub sapient_server_name: Option<String>,
+
     /// Persistence directory. Defaults to a tempdir.
     #[arg(long)]
     pub storage: Option<PathBuf>,
@@ -49,6 +69,26 @@ pub struct Cli {
     /// Use TLS for the TAK Server connection.
     #[arg(long)]
     pub tak_tls: bool,
+
+    /// Client certificate PEM for TAK mTLS.
+    #[arg(long)]
+    pub tak_cert: Option<PathBuf>,
+
+    /// Client private key PEM for TAK mTLS.
+    #[arg(long)]
+    pub tak_key: Option<PathBuf>,
+
+    /// CA certificate PEM for TAK server verification.
+    #[arg(long)]
+    pub tak_ca_cert: Option<PathBuf>,
+
+    /// Callsign for TAK identification (default: "Peat-BRIDGE").
+    #[arg(long)]
+    pub tak_callsign: Option<String>,
+
+    /// TLS server name for TAK SNI (hostname from the server cert).
+    #[arg(long)]
+    pub tak_server_name: Option<String>,
 
     /// Mesh-side node ID for the TAK Server peer.
     #[arg(long, default_value = "tak-server-0")]
@@ -95,6 +135,16 @@ pub struct SapientConfig {
     pub remote: Option<SocketAddr>,
     /// Peer node ID for DLMM mode.
     pub peer_node_id: Option<String>,
+    /// Use TLS for the SAPIENT connection.
+    pub tls: Option<bool>,
+    /// Certificate PEM path (server cert in HLDMM mode, client cert in DLMM mode).
+    pub cert: Option<PathBuf>,
+    /// Private key PEM path.
+    pub key: Option<PathBuf>,
+    /// CA certificate PEM path for peer verification (mTLS).
+    pub ca_cert: Option<PathBuf>,
+    /// TLS server name for SNI (DLMM mode only).
+    pub tls_server_name: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -103,6 +153,16 @@ pub struct TakConfig {
     pub server: Option<SocketAddr>,
     /// Use TLS for the TAK Server connection.
     pub tls: Option<bool>,
+    /// Client certificate PEM path for mTLS.
+    pub client_cert: Option<PathBuf>,
+    /// Client private key PEM path for mTLS.
+    pub client_key: Option<PathBuf>,
+    /// CA certificate PEM path for server verification.
+    pub ca_cert: Option<PathBuf>,
+    /// Callsign for TAK identification.
+    pub callsign: Option<String>,
+    /// TLS server name for SNI (overrides IP-derived name).
+    pub tls_server_name: Option<String>,
     /// Mesh-side node ID for the TAK Server peer.
     pub peer_node_id: Option<String>,
 }
@@ -139,11 +199,41 @@ impl Config {
         if let Some(id) = &cli.sapient_peer_id {
             config.sapient.peer_node_id = Some(id.clone());
         }
+        if cli.sapient_tls {
+            config.sapient.tls = Some(true);
+        }
+        if let Some(ref path) = cli.sapient_cert {
+            config.sapient.cert = Some(path.clone());
+        }
+        if let Some(ref path) = cli.sapient_key {
+            config.sapient.key = Some(path.clone());
+        }
+        if let Some(ref path) = cli.sapient_ca_cert {
+            config.sapient.ca_cert = Some(path.clone());
+        }
+        if let Some(ref name) = cli.sapient_server_name {
+            config.sapient.tls_server_name = Some(name.clone());
+        }
         if let Some(addr) = cli.tak_server {
             config.tak.server = Some(addr);
         }
         if cli.tak_tls {
             config.tak.tls = Some(true);
+        }
+        if let Some(ref path) = cli.tak_cert {
+            config.tak.client_cert = Some(path.clone());
+        }
+        if let Some(ref path) = cli.tak_key {
+            config.tak.client_key = Some(path.clone());
+        }
+        if let Some(ref path) = cli.tak_ca_cert {
+            config.tak.ca_cert = Some(path.clone());
+        }
+        if let Some(ref callsign) = cli.tak_callsign {
+            config.tak.callsign = Some(callsign.clone());
+        }
+        if let Some(ref name) = cli.tak_server_name {
+            config.tak.tls_server_name = Some(name.clone());
         }
         config
             .tak

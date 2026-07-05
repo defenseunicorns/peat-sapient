@@ -40,6 +40,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use prost::Message as _;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -142,6 +143,10 @@ pub struct PeatSapientTransport {
     capabilities: TransportCapabilities,
     outbound_tx: mpsc::Sender<Vec<u8>>,
     outbound_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<Vec<u8>>>>>,
+    #[cfg(feature = "tls")]
+    tls_config: Option<peat_sapient::connection::SapientTlsConfig>,
+    #[cfg(feature = "tls")]
+    tls_server_name: Option<String>,
 }
 
 impl PeatSapientTransport {
@@ -155,12 +160,6 @@ impl PeatSapientTransport {
             event_senders: Arc::new(RwLock::new(Vec::new())),
             started: RwLock::new(None),
             listener_task: RwLock::new(None),
-            // `..Default::default()` deliberately, not an exhaustive struct
-            // literal: `TransportCapabilities` has picked up fields between
-            // published `peat-mesh` rc's before (e.g. `beacon_capable`), and
-            // exhaustive construction breaks the moment the field set drifts
-            // in either direction. Only override what this transport
-            // actually differs on from the default.
             capabilities: TransportCapabilities {
                 transport_type: TransportType::Custom(SAPIENT_TRANSPORT_TYPE_TAG),
                 max_bandwidth_bps: 0,
@@ -173,7 +172,31 @@ impl PeatSapientTransport {
             },
             outbound_tx,
             outbound_rx: Arc::new(tokio::sync::Mutex::new(Some(outbound_rx))),
+            #[cfg(feature = "tls")]
+            tls_config: None,
+            #[cfg(feature = "tls")]
+            tls_server_name: None,
         }
+    }
+
+    /// Enable TLS for this transport's connections.
+    ///
+    /// - For **HLDMM** mode: pass a server TLS config (built via
+    ///   [`SapientTlsConfig::server`]). `server_name` is ignored.
+    /// - For **DLMM** mode: pass a client TLS config (built via
+    ///   [`SapientTlsConfig::client`]). `server_name` is used for TLS SNI.
+    ///
+    /// [`SapientTlsConfig::server`]: peat_sapient::connection::SapientTlsConfig::server
+    /// [`SapientTlsConfig::client`]: peat_sapient::connection::SapientTlsConfig::client
+    #[cfg(feature = "tls")]
+    pub fn with_tls(
+        mut self,
+        config: peat_sapient::connection::SapientTlsConfig,
+        server_name: Option<String>,
+    ) -> Self {
+        self.tls_config = Some(config);
+        self.tls_server_name = server_name;
+        self
     }
 
     /// Returns an [`OutboundSink`] for use with [`TransportManager::register_translator`].
@@ -241,8 +264,8 @@ impl PeatSapientTransport {
 
     /// Drive one accepted/connected SAPIENT peer until it disconnects or
     /// errors: receive, decode via the translator, publish to the mesh.
-    async fn run_peer_recv_loop(
-        mut framed: SapientFramed,
+    async fn run_peer_recv_loop<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        mut framed: SapientFramed<T>,
         peer_id: NodeId,
         translator: Arc<SapientTranslator>,
         node: Arc<MeshNode>,
@@ -334,8 +357,8 @@ impl PeatSapientTransport {
     /// Bidirectional peer loop for DLMM mode: receives inbound messages AND
     /// sends outbound messages (from the fan-out channel) on the same
     /// connection, using `select!` to alternate.
-    async fn run_dlmm_peer_loop(
-        mut framed: SapientFramed,
+    async fn run_dlmm_peer_loop<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        mut framed: SapientFramed<T>,
         mut outbound_rx: mpsc::Receiver<Vec<u8>>,
         peer_id: NodeId,
         translator: Arc<SapientTranslator>,
@@ -429,19 +452,133 @@ impl PeatSapientTransport {
             recv_task,
         );
     }
+
+    #[cfg(feature = "tls")]
+    async fn run_hldmm_accept_loop_tls(
+        listen_addr: SocketAddr,
+        tls_config: peat_sapient::connection::SapientTlsConfig,
+        translator: Arc<SapientTranslator>,
+        node: Arc<MeshNode>,
+        peers: PeerMap,
+        event_senders: EventSenders,
+    ) {
+        let listener = match TcpListener::bind(listen_addr).await {
+            Ok(l) => l,
+            Err(err) => {
+                warn!(%err, %listen_addr, "sapient: HLDMM TLS listener bind failed");
+                return;
+            }
+        };
+        loop {
+            match connection::accept_tls(&listener, &tls_config).await {
+                Ok((framed, addr)) => {
+                    let peer_id = NodeId::from(addr.to_string());
+                    let alive = Arc::new(AtomicBool::new(true));
+                    let connected_at = Instant::now();
+                    let recv_task = tokio::spawn(Self::run_peer_recv_loop(
+                        framed,
+                        peer_id.clone(),
+                        translator.clone(),
+                        node.clone(),
+                        alive.clone(),
+                    ));
+                    Self::register_peer(
+                        &peers,
+                        &event_senders,
+                        peer_id,
+                        connected_at,
+                        alive,
+                        recv_task,
+                    );
+                }
+                Err(err) => {
+                    warn!(%err, "sapient: TLS accept failed, listener loop continuing");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[allow(clippy::too_many_arguments)]
+    async fn run_dlmm_connect_loop_tls(
+        remote_addr: SocketAddr,
+        peer_node_id: NodeId,
+        tls_config: peat_sapient::connection::SapientTlsConfig,
+        server_name: String,
+        translator: Arc<SapientTranslator>,
+        node: Arc<MeshNode>,
+        peers: PeerMap,
+        event_senders: EventSenders,
+        outbound_rx: mpsc::Receiver<Vec<u8>>,
+    ) {
+        let framed = match connection::connect_tls_with_retry(
+            remote_addr,
+            &tls_config,
+            &server_name,
+            &ReconnectConfig::default(),
+        )
+        .await
+        {
+            Ok(framed) => framed,
+            Err(err) => {
+                warn!(%err, %remote_addr, "sapient: DLMM TLS connect_with_retry exhausted");
+                return;
+            }
+        };
+        let alive = Arc::new(AtomicBool::new(true));
+        let connected_at = Instant::now();
+        let recv_task = tokio::spawn(Self::run_dlmm_peer_loop(
+            framed,
+            outbound_rx,
+            peer_node_id.clone(),
+            translator,
+            node,
+            alive.clone(),
+        ));
+        Self::register_peer(
+            &peers,
+            &event_senders,
+            peer_node_id,
+            connected_at,
+            alive,
+            recv_task,
+        );
+    }
 }
 
 #[async_trait]
 impl MeshTransport for PeatSapientTransport {
     async fn start(&self) -> Result<()> {
         let task = match self.role.clone() {
-            SapientRole::Hldmm { listen_addr } => tokio::spawn(Self::run_hldmm_accept_loop(
-                listen_addr,
-                self.translator.clone(),
-                self.node.clone(),
-                self.peers.clone(),
-                self.event_senders.clone(),
-            )),
+            SapientRole::Hldmm { listen_addr } => {
+                #[cfg(feature = "tls")]
+                if let Some(tls) = self.tls_config.clone() {
+                    tokio::spawn(Self::run_hldmm_accept_loop_tls(
+                        listen_addr,
+                        tls,
+                        self.translator.clone(),
+                        self.node.clone(),
+                        self.peers.clone(),
+                        self.event_senders.clone(),
+                    ))
+                } else {
+                    tokio::spawn(Self::run_hldmm_accept_loop(
+                        listen_addr,
+                        self.translator.clone(),
+                        self.node.clone(),
+                        self.peers.clone(),
+                        self.event_senders.clone(),
+                    ))
+                }
+                #[cfg(not(feature = "tls"))]
+                tokio::spawn(Self::run_hldmm_accept_loop(
+                    listen_addr,
+                    self.translator.clone(),
+                    self.node.clone(),
+                    self.peers.clone(),
+                    self.event_senders.clone(),
+                ))
+            }
             SapientRole::Dlmm {
                 remote_addr,
                 peer_node_id,
@@ -452,6 +589,35 @@ impl MeshTransport for PeatSapientTransport {
                     .await
                     .take()
                     .expect("start() called more than once");
+                #[cfg(feature = "tls")]
+                if let Some(tls) = self.tls_config.clone() {
+                    let server_name = self
+                        .tls_server_name
+                        .clone()
+                        .unwrap_or_else(|| remote_addr.ip().to_string());
+                    tokio::spawn(Self::run_dlmm_connect_loop_tls(
+                        remote_addr,
+                        peer_node_id,
+                        tls,
+                        server_name,
+                        self.translator.clone(),
+                        self.node.clone(),
+                        self.peers.clone(),
+                        self.event_senders.clone(),
+                        outbound_rx,
+                    ))
+                } else {
+                    tokio::spawn(Self::run_dlmm_connect_loop(
+                        remote_addr,
+                        peer_node_id,
+                        self.translator.clone(),
+                        self.node.clone(),
+                        self.peers.clone(),
+                        self.event_senders.clone(),
+                        outbound_rx,
+                    ))
+                }
+                #[cfg(not(feature = "tls"))]
                 tokio::spawn(Self::run_dlmm_connect_loop(
                     remote_addr,
                     peer_node_id,

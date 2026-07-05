@@ -17,8 +17,8 @@ use async_trait::async_trait;
 use peat_mesh::sync::types::Document as MeshDocument;
 use peat_mesh::sync::{DataSyncBackend, InMemoryBackend};
 use peat_mesh::transport::{
-    MeshTransport, NodeId, OutboundSink, TranslationContext,
-    TranslatorRegistrationConfig, TransportManager, TransportManagerConfig,
+    MeshTransport, NodeId, OutboundSink, TranslationContext, TranslatorRegistrationConfig,
+    TransportManager, TransportManagerConfig,
 };
 use peat_mesh::Node;
 use peat_mesh_sapient::SapientTranslator;
@@ -150,16 +150,14 @@ async fn inbound_cot_from_tak_server_reaches_sapient_sink() {
         server_addr,
         peer_node_id: NodeId::from("mock-tak-server"),
         use_tls: false,
+        identity: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
     let tak_sink = tak_transport.outbound_sink();
 
     // Start the transport (spawns worker that dials the mock server).
-    tak_transport
-        .start()
-        .await
-        .expect("start PeatTakTransport");
+    tak_transport.start().await.expect("start PeatTakTransport");
 
     // Accept the connection from PeatTakTransport's worker.
     let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
@@ -219,11 +217,7 @@ async fn inbound_cot_from_tak_server_reaches_sapient_sink() {
             assert_eq!(dr.object_id.as_deref(), Some("tank-alpha"));
             match dr.location_oneof {
                 Some(LocationOneof::Location(loc)) => {
-                    assert!(
-                        (loc.y.unwrap() - 51.5074).abs() < 1e-4,
-                        "lat: {:?}",
-                        loc.y
-                    );
+                    assert!((loc.y.unwrap() - 51.5074).abs() < 1e-4, "lat: {:?}", loc.y);
                     assert!(
                         (loc.x.unwrap() - (-0.1278)).abs() < 1e-4,
                         "lon: {:?}",
@@ -261,15 +255,13 @@ async fn outbound_sapient_doc_reaches_tak_server_as_cot_xml() {
         server_addr,
         peer_node_id: NodeId::from("mock-tak-server"),
         use_tls: false,
+        identity: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
     let tak_sink = tak_transport.outbound_sink();
 
-    tak_transport
-        .start()
-        .await
-        .expect("start PeatTakTransport");
+    tak_transport.start().await.expect("start PeatTakTransport");
 
     let (stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
         .await
@@ -323,14 +315,8 @@ async fn outbound_sapient_doc_reaches_tak_server_as_cot_xml() {
         xml.contains("uid=\"sapient-outbound-001\""),
         "CoT XML missing uid: {xml}"
     );
-    assert!(
-        xml.contains("lat=\"34.052"),
-        "CoT XML missing lat: {xml}"
-    );
-    assert!(
-        xml.contains("lon=\"-118.243"),
-        "CoT XML missing lon: {xml}"
-    );
+    assert!(xml.contains("lat=\"34.052"), "CoT XML missing lat: {xml}");
+    assert!(xml.contains("lon=\"-118.243"), "CoT XML missing lon: {xml}");
     assert!(
         xml.contains("type=\"a-f-G-U-C\""),
         "CoT XML should have default cot_type: {xml}"
@@ -346,9 +332,7 @@ async fn outbound_sapient_doc_reaches_tak_server_as_cot_xml() {
 /// 2. Publish SAPIENT-origin doc → verifies mock receives CoT XML
 #[tokio::test]
 async fn bidirectional_over_single_connection() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let server_addr = listener.local_addr().expect("local_addr");
 
     let backend: Arc<dyn DataSyncBackend> = Arc::new(InMemoryBackend::new_initialized());
@@ -361,6 +345,7 @@ async fn bidirectional_over_single_connection() {
         server_addr,
         peer_node_id: NodeId::from("mock-tak"),
         use_tls: false,
+        identity: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
@@ -427,11 +412,10 @@ async fn bidirectional_over_single_connection() {
         .await
         .unwrap();
 
-    let outbound_xml =
-        tokio::time::timeout(Duration::from_secs(5), recv_tak_frame(&mut reader))
-            .await
-            .expect("recv timeout")
-            .expect("recv outbound CoT");
+    let outbound_xml = tokio::time::timeout(Duration::from_secs(5), recv_tak_frame(&mut reader))
+        .await
+        .expect("recv timeout")
+        .expect("recv outbound CoT");
 
     assert!(
         outbound_xml.contains("uid=\"bidi-out-001\""),

@@ -128,26 +128,66 @@ async fn main() -> Result<()> {
     let translator = Arc::new(SapientTranslator::new());
 
     let sapient_role = resolve_sapient_role(&config.sapient)?;
-    let transport =
+    let use_sapient_tls = config.sapient.tls.unwrap_or(false);
+    let mut transport =
         PeatSapientTransport::new(sapient_role.clone(), node.clone(), translator.clone());
+
+    #[cfg(feature = "tls")]
+    if use_sapient_tls {
+        let tls_config = build_sapient_tls(&config.sapient, &sapient_role)?;
+        transport = transport.with_tls(tls_config, config.sapient.tls_server_name.clone());
+    }
+
     let sink = transport.outbound_sink();
 
     transport.start().await.context("start SAPIENT transport")?;
-    info!("sapient: started ({:?})", role_summary(&sapient_role));
+    info!(
+        "sapient: started ({}, tls={})",
+        role_summary(&sapient_role),
+        use_sapient_tls
+    );
 
     // -- TAK transport (optional) --
     let tak_transport = if let Some(server_addr) = config.tak.server {
         let tak_translator = Arc::new(CotTranslator::new());
         let tak_peer_id = config.tak.peer_node_id.as_deref().unwrap_or("tak-server-0");
+        let use_tls = config.tak.tls.unwrap_or(false);
+        let identity = if use_tls {
+            let client_cert = config
+                .tak
+                .client_cert
+                .clone()
+                .ok_or_else(|| anyhow!("TAK TLS requires --tak-cert"))?;
+            let client_key = config
+                .tak
+                .client_key
+                .clone()
+                .ok_or_else(|| anyhow!("TAK TLS requires --tak-key"))?;
+            Some(peat_tak::TakIdentity {
+                client_cert,
+                client_key,
+                ca_cert: config.tak.ca_cert.clone(),
+                callsign: config
+                    .tak
+                    .callsign
+                    .clone()
+                    .unwrap_or_else(|| "Peat-BRIDGE".into()),
+                tls_server_name: config.tak.tls_server_name.clone(),
+                credentials: None,
+            })
+        } else {
+            None
+        };
         let tak_config = TakMeshConfig {
             server_addr,
             peer_node_id: NodeId::from(tak_peer_id),
-            use_tls: config.tak.tls.unwrap_or(false),
+            use_tls,
+            identity,
         };
         let t = PeatTakTransport::new(tak_config, node.clone(), tak_translator.clone());
         let tak_sink = t.outbound_sink();
         t.start().await.context("start TAK transport")?;
-        info!("tak: started (server={})", server_addr);
+        info!("tak: started (server={}, tls={})", server_addr, use_tls);
         Some((t, tak_translator, tak_sink))
     } else {
         None
@@ -216,6 +256,36 @@ fn role_summary(role: &SapientRole) -> String {
             remote_addr,
             peer_node_id,
         } => format!("DLMM connecting to {remote_addr} as {peer_node_id}"),
+    }
+}
+
+#[cfg(feature = "tls")]
+fn build_sapient_tls(
+    cfg: &config::SapientConfig,
+    role: &SapientRole,
+) -> Result<peat_sapient::connection::SapientTlsConfig> {
+    let cert = cfg
+        .cert
+        .as_ref()
+        .ok_or_else(|| anyhow!("SAPIENT TLS requires --sapient-cert"))?;
+    let key = cfg
+        .key
+        .as_ref()
+        .ok_or_else(|| anyhow!("SAPIENT TLS requires --sapient-key"))?;
+
+    match role {
+        SapientRole::Hldmm { .. } => {
+            peat_sapient::connection::SapientTlsConfig::server(cert, key, cfg.ca_cert.as_deref())
+                .context("build SAPIENT HLDMM TLS config")
+        }
+        SapientRole::Dlmm { .. } => {
+            let ca = cfg
+                .ca_cert
+                .as_ref()
+                .ok_or_else(|| anyhow!("SAPIENT DLMM TLS requires --sapient-ca-cert"))?;
+            peat_sapient::connection::SapientTlsConfig::client(ca, Some(cert), Some(key))
+                .context("build SAPIENT DLMM TLS config")
+        }
     }
 }
 

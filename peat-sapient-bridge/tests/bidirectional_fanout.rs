@@ -157,10 +157,7 @@ async fn tak_origin_doc_reaches_sapient_sink() {
             match dr.location_oneof {
                 Some(LocationOneof::Location(loc)) => {
                     assert!((loc.y.unwrap() - 51.5074).abs() < 1e-6, "lat mismatch");
-                    assert!(
-                        (loc.x.unwrap() - (-0.1278)).abs() < 1e-6,
-                        "lon mismatch"
-                    );
+                    assert!((loc.x.unwrap() - (-0.1278)).abs() < 1e-6, "lon mismatch");
                     assert!((loc.z.unwrap() - 45.0).abs() < 1e-6, "hae mismatch");
                 }
                 other => panic!("expected Location, got {other:?}"),
@@ -216,10 +213,7 @@ async fn sapient_origin_doc_reaches_tak_sink() {
         "CoT XML missing default cot_type: {xml}"
     );
     assert!(xml.contains("lat=\"34.052"), "CoT XML missing lat: {xml}");
-    assert!(
-        xml.contains("lon=\"-118.243"),
-        "CoT XML missing lon: {xml}"
-    );
+    assert!(xml.contains("lon=\"-118.243"), "CoT XML missing lon: {xml}");
 
     // SAPIENT sink must NOT receive the same doc (origin echo prevention).
     let sapient = sapient_captured.lock().await;
