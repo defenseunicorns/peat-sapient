@@ -591,10 +591,13 @@ impl MeshTransport for PeatSapientTransport {
                     .expect("start() called more than once");
                 #[cfg(feature = "tls")]
                 if let Some(tls) = self.tls_config.clone() {
-                    let server_name = self
-                        .tls_server_name
-                        .clone()
-                        .unwrap_or_else(|| remote_addr.ip().to_string());
+                    let server_name = self.tls_server_name.clone().unwrap_or_else(|| {
+                        tracing::warn!(
+                            "no TLS server name configured; falling back to remote IP {}",
+                            remote_addr.ip()
+                        );
+                        remote_addr.ip().to_string()
+                    });
                     tokio::spawn(Self::run_dlmm_connect_loop_tls(
                         remote_addr,
                         peer_node_id,

@@ -22,6 +22,8 @@ peat-sapient = { path = "../peat-sapient" }
 peat-tak = { version = "0.0.1", features = ["mesh-translator"] }
 
 anyhow = "1"
+base64 = "0.22"
+rand = "0.8"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"

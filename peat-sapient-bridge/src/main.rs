@@ -129,14 +129,23 @@ async fn main() -> Result<()> {
 
     let sapient_role = resolve_sapient_role(&config.sapient)?;
     let use_sapient_tls = config.sapient.tls.unwrap_or(false);
-    let mut transport =
-        PeatSapientTransport::new(sapient_role.clone(), node.clone(), translator.clone());
 
-    #[cfg(feature = "tls")]
+    #[cfg(not(feature = "tls"))]
     if use_sapient_tls {
-        let tls_config = build_sapient_tls(&config.sapient, &sapient_role)?;
-        transport = transport.with_tls(tls_config, config.sapient.tls_server_name.clone());
+        anyhow::bail!("sapient.tls = true but binary was compiled without the `tls` feature");
     }
+
+    let transport = {
+        let t = PeatSapientTransport::new(sapient_role.clone(), node.clone(), translator.clone());
+        #[cfg(feature = "tls")]
+        let t = if use_sapient_tls {
+            let tls_config = build_sapient_tls(&config.sapient, &sapient_role)?;
+            t.with_tls(tls_config, config.sapient.tls_server_name.clone())
+        } else {
+            t
+        };
+        t
+    };
 
     let sink = transport.outbound_sink();
 
@@ -290,35 +299,9 @@ fn build_sapient_tls(
 }
 
 fn base64_default_key() -> String {
-    use std::io::Read;
+    use base64::Engine;
+    use rand::RngCore;
     let mut bytes = [0u8; 32];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-    }
-    base64_encode(&bytes)
-}
-
-fn base64_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 4 / 3 + 4);
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        let _ = s.write_char(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        let _ = s.write_char(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            let _ = s.write_char(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            let _ = s.write_char('=');
-        }
-        if chunk.len() > 2 {
-            let _ = s.write_char(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            let _ = s.write_char('=');
-        }
-    }
-    s
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }

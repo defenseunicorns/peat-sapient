@@ -23,7 +23,7 @@ shared_key = "c2FwaWVudC1icmlkZ2Utc2VjcmV0LWtleQ=="
 
 [sapient]
 # "hldmm" — accept DLMM connections from SAPIENT sensors.
-# "dlmm"  — connect to an external HLDMM (e.g. Apex middleware).
+# "dlmm"  — connect to an external HLDMM.
 role = "hldmm"
 # HLDMM mode: listen address for incoming DLMM connections.
 listen = "0.0.0.0:12000"
