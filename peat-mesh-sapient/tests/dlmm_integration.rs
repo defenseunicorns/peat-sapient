@@ -555,6 +555,69 @@ async fn dlmm_reconnects_after_hldmm_drops_connection() {
     transport.stop().await.expect("stop");
 }
 
+/// Calling `disconnect()` on a DLMM peer aborts the recv task, which closes
+/// the TCP connection and exits the reconnect loop (no automatic reconnect).
+#[tokio::test]
+async fn disconnect_closes_dlmm_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let remote_addr = listener.local_addr().expect("local_addr");
+
+    let backend: Arc<dyn DataSyncBackend> = Arc::new(InMemoryBackend::new_initialized());
+    let node = Arc::new(Node::new(backend));
+    let translator = Arc::new(SapientTranslator::new());
+
+    let transport = PeatSapientTransport::new(
+        SapientRole::Dlmm {
+            remote_addr,
+            peer_node_id: NodeId::from("hldmm-dc"),
+        },
+        node.clone(),
+        translator,
+    );
+    let mut events = transport.subscribe_peer_events();
+    transport.start().await.expect("start");
+
+    let (mut framed, _) = connection::accept(&listener).await.expect("accept");
+
+    // Wait for Connected.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Connected { .. })) => {}
+        other => panic!("expected Connected, got {other:?}"),
+    }
+
+    // Disconnect the peer from our side.
+    transport
+        .disconnect(&NodeId::from("hldmm-dc"))
+        .await
+        .expect("disconnect");
+
+    // Should receive Disconnected with LocalClosed reason.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Disconnected { .. })) => {}
+        other => panic!("expected Disconnected, got {other:?}"),
+    }
+
+    // The TCP connection should be closed — the fake HLDMM's recv returns None.
+    let closed = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut framed)).await;
+    match closed {
+        Ok(Ok(None)) => {} // peer closed — expected
+        Ok(Err(_)) => {}   // I/O error on closed connection — also fine
+        other => panic!("expected closed connection, got {other:?}"),
+    }
+
+    // Peer should be gone (disconnect removed it), and the transport should
+    // NOT reconnect (verify no second accept within 2s).
+    assert_eq!(transport.peer_count(), 0);
+    let no_reconnect =
+        tokio::time::timeout(Duration::from_secs(2), connection::accept(&listener)).await;
+    assert!(
+        no_reconnect.is_err(),
+        "transport should not reconnect after disconnect()"
+    );
+}
+
 /// Transport::stop() terminates the peer loop and cleans up.
 #[tokio::test]
 async fn stop_terminates_dlmm_connection() {
