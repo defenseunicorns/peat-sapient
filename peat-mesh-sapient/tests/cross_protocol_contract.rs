@@ -100,6 +100,28 @@ async fn cot_specific_fields_ignored_gracefully() {
     }
 }
 
+/// A doc missing `lat` is declined — encode_outbound returns None.
+#[tokio::test]
+async fn missing_lat_declined() {
+    let t = SapientTranslator::new();
+    let fields = HashMap::from([("lon".to_string(), json!(-0.1278))]);
+    let doc = MeshDocument::with_id("no-lat".to_string(), fields);
+    let ctx = TranslationContext::outbound().with_collection("tracks");
+
+    assert!(t.encode_outbound(&doc, &ctx).await.is_none());
+}
+
+/// A doc missing `lon` is declined — encode_outbound returns None.
+#[tokio::test]
+async fn missing_lon_declined() {
+    let t = SapientTranslator::new();
+    let fields = HashMap::from([("lat".to_string(), json!(51.5074))]);
+    let doc = MeshDocument::with_id("no-lon".to_string(), fields);
+    let ctx = TranslationContext::outbound().with_collection("tracks");
+
+    assert!(t.encode_outbound(&doc, &ctx).await.is_none());
+}
+
 /// Full round-trip: SAPIENT protobuf → decode_inbound → mesh doc →
 /// encode_outbound → protobuf. Position must survive.
 #[tokio::test]
