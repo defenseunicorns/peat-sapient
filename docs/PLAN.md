@@ -185,13 +185,35 @@ Apex-dependent tests skip cleanly when `apex.py` is not on PATH.
 
 ---
 
-## Phase 5 — Formal compliance (manual gate, not CI) ⏳
+## Phase 5 — BSI Flex 335 v2.0 compliance validation ✅
 
-Run BSI Flex 335 v2 test harness (C#, Windows) against `peat-sapient` over TCP.
+**Goal:** Validate peat-sapient's wire output against Dstl's official FluentValidation
+validators, automated in CI.
 
-See `docs/compliance.md` for the full procedure.
+### Approach
 
-**Gate:** pass/fail per message type documented in the PR that completes Phase 4.
+Rather than requiring Windows + the full GUI test harness, we built a headless
+cross-platform compliance runner (`compliance/SapientComplianceRunner/`) that
+wraps Dstl's existing `SapientServices` validators and `SAPIENTMessageProcessor`
+wire framing as a .NET 8 console app. A Rust compliance client binary
+(`sapient-compliance-client`) acts as a minimal DLMM using peat-sapient's
+native codec.
+
+### CI job (`BSI Flex 335 v2.0 Compliance`)
+
+1. Checks out `dstl/BSI-Flex-335-v2-Test-Harness` (pinned SHA)
+2. Overlays `compliance/SapientComplianceRunner/` into the test harness tree
+3. Builds the .NET runner (HLDMM mode) and Rust client
+4. Runs the interop test: Rust client connects, exercises the full message
+   exchange (Registration → RegistrationAck → StatusReport → DetectionReport
+   → Task → TaskAck), .NET validators check every message
+5. Uploads structured JSON results as a build artifact
+
+### Results
+
+5 pass, 0 fail, 1 skip (AlertAck — optional per BSI Flex 335 v2.0).
+
+**Gate:** CI `compliance` job green on PR #41.
 
 ---
 
@@ -356,7 +378,7 @@ mesh-originated tracks could reach the HLDMM.
 | 2 | TCP codec + connection | No | Yes | ✅ Done |
 | 3 | Message mapping | Yes (`peat` feature) | Yes | ✅ Done |
 | 4 | Bridge API + integration tests | Yes | Yes | ✅ Done |
-| 5 | Formal compliance | — | Manual | ⏳ Pending |
+| 5 | BSI Flex 335 v2.0 compliance | No | Yes | ✅ Done |
 | 6 | SAPIENT ↔ CoT via peat-mesh Translator (v1: tracks/platforms inbound) | Yes (`peat-mesh-sapient`) | Yes | ✅ Done |
 | 7 | Bidirectional bridging + bridge binary | Yes (3-crate workspace) | Yes | ✅ Done |
 | 8 | DLMM reconnect resilience | Yes (`peat-mesh-sapient`) | Yes | ✅ Done |
