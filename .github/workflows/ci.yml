@@ -79,3 +79,26 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  audit-ignore-expiry:
+    name: Audit Ignore Expiry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if audit ignores have expired
+        run: |
+          if [ ! -f .cargo/audit.toml ]; then
+            echo "No .cargo/audit.toml — nothing to check."
+            exit 0
+          fi
+          if ! grep -q 'RUSTSEC-2026-019[45]' .cargo/audit.toml; then
+            echo "quick-xml ignores already removed — nothing to check."
+            exit 0
+          fi
+          EXPIRY="2026-10-01"
+          TODAY=$(date +%Y-%m-%d)
+          if [[ "$TODAY" > "$EXPIRY" || "$TODAY" == "$EXPIRY" ]]; then
+            echo "::error::Audit ignore expiry date ($EXPIRY) has passed. Remove RUSTSEC-2026-0194/0195 from .cargo/audit.toml and upgrade quick-xml (peat#1012)."
+            exit 1
+          fi
+          echo "Audit ignores still within time-box (expires $EXPIRY, today is $TODAY)."

@@ -23,6 +23,8 @@ peat = ["dep:peat-schema", "dep:ulid"]
 # own — see ADR-059 Amendment 4 (peat repo): wire codec stays in the transport crate,
 # the Translator trait impl lives in a separate one-way adapter crate (peat-mesh-sapient).
 translator-codec = ["peat"]
+# TLS support for SAPIENT TCP connections (DLMM↔HLDMM).
+tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
 # Integration tests against the Apex SAPIENT middleware (requires apex.py on PATH).
 integration-tests = []
 
@@ -45,12 +47,18 @@ ulid = { version = "1", optional = true }
 
 futures-util = { version = "0.3", features = ["sink"] }
 
+# TLS support (optional, behind "tls" feature)
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2.2", optional = true }
+
 [build-dependencies]
 prost-build = "0.13"
 protoc-bin-vendored = "3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+rcgen = "0.14"
+tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

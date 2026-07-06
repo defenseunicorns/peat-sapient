@@ -1,0 +1,12 @@
+[advisories]
+# quick-xml DoS vulnerabilities — transitive dep via peat-protocol/peat-schema;
+# fix is upstream (quick-xml >= 0.41.0). Tracked in peat#1012.
+# Runtime mitigation: peat-tak enforces a configurable max_message_bytes cap
+# (default 64 KB) at the TCP ingress boundary, rejecting oversized XML before
+# it reaches the parser. CI enforces the expiry date below via the
+# audit-ignore-expiry job.
+# Remove after 2026-10-01 or when peat-protocol upgrades to quick-xml >= 0.41.0.
+ignore = [
+    "RUSTSEC-2026-0194",  # quadratic attribute-name dedup
+    "RUSTSEC-2026-0195",  # unbounded namespace allocation
+]

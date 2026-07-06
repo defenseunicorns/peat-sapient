@@ -1,0 +1,54 @@
+# peat-sapient-bridge configuration
+#
+# CLI flags override any value set here.
+# Run with: peat-sapient-bridge --config bridge.toml
+#
+# Known advisory: the TAK CoT XML path uses quick-xml < 0.41.0, which is
+# vulnerable to quadratic attribute-name dedup (RUSTSEC-2026-0194) and
+# unbounded namespace allocation (RUSTSEC-2026-0195). Both are DoS vectors
+# on untrusted XML input. Runtime mitigation: peat-tak enforces a configurable
+# max_message_bytes cap (default 64 KB) at the TCP ingress boundary, rejecting
+# oversized XML before it reaches the parser. Full fix lands once peat-protocol
+# upgrades peat-schema to quick-xml >= 0.41.0.
+# Tracked in https://github.com/defenseunicorns/peat/issues/1012
+
+[node]
+# Friendly name — also used as the iroh identity seed (same name = same NodeId).
+name = "bridge-uk"
+# Mesh bind address for iroh QUIC endpoint. Peers reach this node at this addr.
+bind = "0.0.0.0:9001"
+# Persistence directory. Omit for a tempdir (data lost on restart).
+# storage = "/var/lib/peat-sapient-bridge"
+
+[mesh]
+# Formation identifier and shared secret for authenticated mesh sync.
+# All bridge nodes in a formation must share these values.
+formation_id = "sapient-bridge"
+shared_key = "c2FwaWVudC1icmlkZ2Utc2VjcmV0LWtleQ=="
+# Static mesh peers: NODE_ID_HEX@ADDR. Connect to other bridge instances.
+# peers = [
+#     "abc123...64hexchars...@10.0.0.2:9001",
+# ]
+
+[sapient]
+# "hldmm" — accept DLMM connections from SAPIENT sensors.
+# "dlmm"  — connect to an external HLDMM.
+role = "hldmm"
+# HLDMM mode: listen address for incoming DLMM connections.
+listen = "0.0.0.0:12000"
+# DLMM mode: remote HLDMM address and peer identity.
+# remote = "10.0.1.5:12000"
+# peer_node_id = "external-hldmm"
+
+# [tak]
+# TAK Server connection (optional — omit to run without TAK).
+# server = "10.0.0.10:8089"
+# tls = true
+# client_cert = "/etc/peat/tak-client.pem"
+# client_key = "/etc/peat/tak-client-key.pem"
+# ca_cert = "/etc/peat/tak-ca.pem"
+# callsign = "Peat-BRIDGE"
+# Max inbound CoT XML message size (bytes). Rejects oversized
+# messages before XML parsing to mitigate RUSTSEC-2026-0194/0195.
+# Default: 65536 (64 KB).
+# max_message_bytes = 65536

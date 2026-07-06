@@ -12,6 +12,10 @@ categories = ["network-programming", "encoding"]
 [lib]
 doctest = false
 
+[features]
+default = []
+tls = ["peat-sapient/tls"]
+
 [dependencies]
 # One-way: this crate depends on peat-mesh (for the Translator/Transport traits)
 # and peat-sapient (for the wire codec), never the reverse. See ADR-059
