@@ -93,7 +93,7 @@ jobs:
         run: dotnet build test-harness/SapientComplianceRunner/SapientComplianceRunner.csproj -c Release
       - name: Build compliance client
         working-directory: peat-sapient
-        run: cargo build --bin sapient-compliance-client --release
+        run: cargo build --bin sapient-compliance-client --no-default-features --release
       - name: Run compliance test
         run: |
           dotnet run --project test-harness/SapientComplianceRunner/SapientComplianceRunner.csproj \
