@@ -72,6 +72,7 @@ async fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(base64_default_key);
 
+    // Field-by-field: AutomergeBackendConfig is #[non_exhaustive]
     let mut backend_config = AutomergeBackendConfig::default();
     backend_config.data_dir = data_dir.clone();
     backend_config.formation_id = formation_id.clone();
