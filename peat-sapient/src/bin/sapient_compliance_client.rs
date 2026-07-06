@@ -32,7 +32,7 @@ use peat_sapient::proto::{
 fn now() -> Option<Timestamp> {
     let d = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
+        .unwrap_or_default();
     Some(Timestamp {
         seconds: d.as_secs() as i64,
         nanos: d.subsec_nanos() as i32,
@@ -200,7 +200,7 @@ async fn main() -> ExitCode {
                 x: Some(-1.8224),
                 y: Some(51.1740),
                 z: Some(100.0),
-                coordinate_system: Some(1), // LatLngDegM
+                coordinate_system: Some(LocationCoordinateSystem::LatLngDegM.into()),
                 datum: Some(LocationDatum::Wgs84E.into()),
                 ..Default::default()
             })),

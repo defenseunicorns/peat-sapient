@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: dstl/BSI-Flex-335-v2-Test-Harness
-          ref: main
+          ref: 6a2999d70d761d224914ddd8fa3f663af5005be0
           path: test-harness
       - name: Install compliance runner into test harness tree
         run: cp -r peat-sapient/compliance/SapientComplianceRunner test-harness/SapientComplianceRunner
@@ -93,7 +93,7 @@ jobs:
         run: dotnet build test-harness/SapientComplianceRunner/SapientComplianceRunner.csproj -c Release
       - name: Build compliance client
         working-directory: peat-sapient
-        run: cargo build --bin sapient-compliance-client --no-default-features --release
+        run: cargo build --bin sapient-compliance-client --no-default-features --features compliance-bin --release
       - name: Run compliance test
         run: |
           dotnet run --project test-harness/SapientComplianceRunner/SapientComplianceRunner.csproj \
@@ -101,7 +101,7 @@ jobs:
             --mode hldmm --port 15066 --timeout 30 \
             --output "$GITHUB_WORKSPACE/compliance-results.json" &
           HLDMM_PID=$!
-          sleep 3
+          timeout 15 bash -c 'until nc -z 127.0.0.1 15066 2>/dev/null; do sleep 0.2; done'
           peat-sapient/target/release/sapient-compliance-client 127.0.0.1:15066
           CLIENT_EXIT=$?
           wait $HLDMM_PID 2>/dev/null
