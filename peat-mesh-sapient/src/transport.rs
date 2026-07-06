@@ -26,6 +26,17 @@
 //! In HLDMM mode, outbound is a no-op — there is no BSI Flex 335 v2.0
 //! message for pushing tracks downstream to DLMMs.
 //!
+//! ## Reconnect (DLMM mode)
+//!
+//! When the HLDMM drops the TCP connection, the DLMM transport reconnects
+//! automatically with exponential backoff. The outbound channel survives
+//! across reconnections — messages queued during the outage are flushed on
+//! the new connection. The reconnect loop exits when the peer record is
+//! deliberately removed (via [`disconnect()`] or [`stop()`]), or if
+//! `connect_with_retry` exhausts its attempts (currently infinite — a
+//! finite cap would need an upstream change to
+//! `peat_sapient::connection`).
+//!
 //! `send_to` is intentionally left at `MeshTransport`'s default
 //! (`Err("send not implemented")`) — outbound goes through the fan-out
 //! sink, not the `MeshTransport::send_to` path.
@@ -42,9 +53,9 @@ use async_trait::async_trait;
 use prost::Message as _;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use peat_mesh::transport::{
     ConnectionHealth, ConnectionState, DisconnectReason, MeshConnection, MeshTransport, NodeId,
@@ -357,6 +368,9 @@ impl PeatSapientTransport {
     /// Bidirectional peer loop for DLMM mode: receives inbound messages AND
     /// sends outbound messages (from the fan-out channel) on the same
     /// connection, using `select!` to alternate.
+    ///
+    /// Returns `outbound_rx` so the caller's reconnect loop can hand it to
+    /// the next connection — the channel survives across reconnections.
     async fn run_dlmm_peer_loop<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
         mut framed: SapientFramed<T>,
         mut outbound_rx: mpsc::Receiver<Vec<u8>>,
@@ -364,7 +378,7 @@ impl PeatSapientTransport {
         translator: Arc<SapientTranslator>,
         node: Arc<MeshNode>,
         alive: Arc<AtomicBool>,
-    ) {
+    ) -> mpsc::Receiver<Vec<u8>> {
         loop {
             tokio::select! {
                 inbound = connection::recv(&mut framed) => {
@@ -414,6 +428,33 @@ impl PeatSapientTransport {
             }
         }
         alive.store(false, Ordering::Relaxed);
+        outbound_rx
+    }
+
+    /// Remove a peer record and emit `PeerEvent::Disconnected`. Used by the
+    /// DLMM reconnect loop between connection attempts.
+    fn deregister_peer(
+        peers: &PeerMap,
+        event_senders: &EventSenders,
+        peer_id: &NodeId,
+        connected_at: Instant,
+    ) {
+        if let Some(record) = peers
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(peer_id)
+        {
+            record.recv_task.abort();
+        }
+        let connection_duration = connected_at.elapsed();
+        let senders = event_senders.read().unwrap_or_else(|e| e.into_inner());
+        for sender in senders.iter() {
+            let _ = sender.try_send(PeerEvent::Disconnected {
+                peer_id: peer_id.clone(),
+                reason: DisconnectReason::RemoteClosed,
+                connection_duration,
+            });
+        }
     }
 
     async fn run_dlmm_connect_loop(
@@ -423,34 +464,73 @@ impl PeatSapientTransport {
         node: Arc<MeshNode>,
         peers: PeerMap,
         event_senders: EventSenders,
-        outbound_rx: mpsc::Receiver<Vec<u8>>,
+        mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     ) {
-        let framed =
-            match connection::connect_with_retry(remote_addr, &ReconnectConfig::default()).await {
+        loop {
+            let framed = match connection::connect_with_retry(
+                remote_addr,
+                &ReconnectConfig::default(),
+            )
+            .await
+            {
                 Ok(framed) => framed,
                 Err(err) => {
                     warn!(%err, %remote_addr, "sapient: DLMM connect_with_retry exhausted");
                     return;
                 }
             };
-        let alive = Arc::new(AtomicBool::new(true));
-        let connected_at = Instant::now();
-        let recv_task = tokio::spawn(Self::run_dlmm_peer_loop(
-            framed,
-            outbound_rx,
-            peer_node_id.clone(),
-            translator,
-            node,
-            alive.clone(),
-        ));
-        Self::register_peer(
-            &peers,
-            &event_senders,
-            peer_node_id,
-            connected_at,
-            alive,
-            recv_task,
-        );
+            let alive = Arc::new(AtomicBool::new(true));
+            let connected_at = Instant::now();
+            let (return_tx, return_rx) = oneshot::channel();
+
+            let recv_task = tokio::spawn({
+                let peer_id = peer_node_id.clone();
+                let translator = translator.clone();
+                let node = node.clone();
+                let alive = alive.clone();
+                async move {
+                    let rx = Self::run_dlmm_peer_loop(
+                        framed,
+                        outbound_rx,
+                        peer_id,
+                        translator,
+                        node,
+                        alive,
+                    )
+                    .await;
+                    let _ = return_tx.send(rx);
+                }
+            });
+
+            Self::register_peer(
+                &peers,
+                &event_senders,
+                peer_node_id.clone(),
+                connected_at,
+                alive,
+                recv_task,
+            );
+
+            match return_rx.await {
+                Ok(rx) => outbound_rx = rx,
+                Err(_) => {
+                    debug!(%remote_addr, "sapient: DLMM peer loop aborted, exiting reconnect loop");
+                    return;
+                }
+            }
+
+            if !peers
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&peer_node_id)
+            {
+                debug!(%remote_addr, "sapient: DLMM peer removed, not reconnecting");
+                return;
+            }
+
+            Self::deregister_peer(&peers, &event_senders, &peer_node_id, connected_at);
+            info!(%remote_addr, "sapient: DLMM connection lost, reconnecting");
+        }
     }
 
     #[cfg(feature = "tls")]
@@ -509,40 +589,75 @@ impl PeatSapientTransport {
         node: Arc<MeshNode>,
         peers: PeerMap,
         event_senders: EventSenders,
-        outbound_rx: mpsc::Receiver<Vec<u8>>,
+        mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     ) {
-        let framed = match connection::connect_tls_with_retry(
-            remote_addr,
-            &tls_config,
-            &server_name,
-            &ReconnectConfig::default(),
-        )
-        .await
-        {
-            Ok(framed) => framed,
-            Err(err) => {
-                warn!(%err, %remote_addr, "sapient: DLMM TLS connect_with_retry exhausted");
+        loop {
+            let framed = match connection::connect_tls_with_retry(
+                remote_addr,
+                &tls_config,
+                &server_name,
+                &ReconnectConfig::default(),
+            )
+            .await
+            {
+                Ok(framed) => framed,
+                Err(err) => {
+                    warn!(%err, %remote_addr, "sapient: DLMM TLS connect_with_retry exhausted");
+                    return;
+                }
+            };
+            let alive = Arc::new(AtomicBool::new(true));
+            let connected_at = Instant::now();
+            let (return_tx, return_rx) = oneshot::channel();
+
+            let recv_task = tokio::spawn({
+                let peer_id = peer_node_id.clone();
+                let translator = translator.clone();
+                let node = node.clone();
+                let alive = alive.clone();
+                async move {
+                    let rx = Self::run_dlmm_peer_loop(
+                        framed,
+                        outbound_rx,
+                        peer_id,
+                        translator,
+                        node,
+                        alive,
+                    )
+                    .await;
+                    let _ = return_tx.send(rx);
+                }
+            });
+
+            Self::register_peer(
+                &peers,
+                &event_senders,
+                peer_node_id.clone(),
+                connected_at,
+                alive,
+                recv_task,
+            );
+
+            match return_rx.await {
+                Ok(rx) => outbound_rx = rx,
+                Err(_) => {
+                    debug!(%remote_addr, "sapient: DLMM TLS peer loop aborted, exiting reconnect loop");
+                    return;
+                }
+            }
+
+            if !peers
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains_key(&peer_node_id)
+            {
+                debug!(%remote_addr, "sapient: DLMM TLS peer removed, not reconnecting");
                 return;
             }
-        };
-        let alive = Arc::new(AtomicBool::new(true));
-        let connected_at = Instant::now();
-        let recv_task = tokio::spawn(Self::run_dlmm_peer_loop(
-            framed,
-            outbound_rx,
-            peer_node_id.clone(),
-            translator,
-            node,
-            alive.clone(),
-        ));
-        Self::register_peer(
-            &peers,
-            &event_senders,
-            peer_node_id,
-            connected_at,
-            alive,
-            recv_task,
-        );
+
+            Self::deregister_peer(&peers, &event_senders, &peer_node_id, connected_at);
+            info!(%remote_addr, "sapient: DLMM TLS connection lost, reconnecting");
+        }
     }
 }
 

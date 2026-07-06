@@ -16,7 +16,9 @@ use std::collections::HashMap;
 
 use peat_mesh::sync::types::Document as MeshDocument;
 use peat_mesh::sync::{DataSyncBackend, InMemoryBackend, Query};
-use peat_mesh::transport::{MeshTransport, NodeId, TranslationContext, Translator, Transport};
+use peat_mesh::transport::{
+    MeshTransport, NodeId, PeerEvent, TranslationContext, Translator, Transport,
+};
 use peat_mesh::Node;
 use peat_mesh_sapient::{PeatSapientTransport, SapientRole, SapientTranslator};
 use peat_sapient::connection;
@@ -420,6 +422,199 @@ async fn task_message_does_not_land_in_mesh() {
     assert_eq!(
         tracks[0].fields.get("lat").and_then(|v| v.as_f64()),
         Some(2.0)
+    );
+}
+
+/// When the HLDMM drops the connection, the DLMM transport reconnects
+/// automatically. Both inbound and outbound resume on the new connection.
+#[tokio::test]
+async fn dlmm_reconnects_after_hldmm_drops_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let remote_addr = listener.local_addr().expect("local_addr");
+
+    let backend: Arc<dyn DataSyncBackend> = Arc::new(InMemoryBackend::new_initialized());
+    let node = Arc::new(Node::new(backend));
+    let translator = Arc::new(SapientTranslator::new());
+
+    let transport = PeatSapientTransport::new(
+        SapientRole::Dlmm {
+            remote_addr,
+            peer_node_id: NodeId::from("hldmm-reconnect"),
+        },
+        node.clone(),
+        translator.clone(),
+    );
+    let sink = transport.outbound_sink();
+    let mut events = transport.subscribe_peer_events();
+    transport.start().await.expect("start");
+
+    // --- First connection ---
+    let (framed, _) = connection::accept(&listener).await.expect("accept #1");
+
+    // Wait for Connected event.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Connected { .. })) => {}
+        other => panic!("expected Connected, got {other:?}"),
+    }
+
+    // Drop the HLDMM side — simulates HLDMM going down.
+    drop(framed);
+
+    // Should receive a Disconnected event from the reconnect loop.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Disconnected { .. })) => {}
+        other => panic!("expected Disconnected, got {other:?}"),
+    }
+
+    // --- Second connection (automatic reconnect) ---
+    let (mut framed2, _) =
+        tokio::time::timeout(Duration::from_secs(5), connection::accept(&listener))
+            .await
+            .expect("DLMM did not reconnect within 5s")
+            .expect("accept #2");
+
+    // Should receive a Connected event for the new connection.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Connected { .. })) => {}
+        other => panic!("expected Connected after reconnect, got {other:?}"),
+    }
+
+    // Verify outbound works on the new connection.
+    let ctx = TranslationContext::outbound().with_collection("tracks");
+    let fields = HashMap::from([
+        ("lat".to_string(), json!(42.0)),
+        ("lon".to_string(), json!(13.0)),
+    ]);
+    let doc = MeshDocument::with_id("after-reconnect".to_string(), fields);
+    let bytes = translator
+        .encode_outbound(&doc, &ctx)
+        .await
+        .expect("encode");
+    sink.send_outbound(bytes, &ctx)
+        .await
+        .expect("outbound after reconnect");
+
+    let mut received = None;
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_millis(20), connection::recv(&mut framed2)).await
+        {
+            Ok(Ok(Some(msg))) => {
+                received = Some(msg);
+                break;
+            }
+            Ok(Ok(None)) => panic!("connection closed unexpectedly"),
+            Ok(Err(err)) => panic!("recv error: {err}"),
+            Err(_) => continue,
+        }
+    }
+    let msg = received.expect("outbound should arrive after reconnect");
+    match msg.content {
+        Some(Content::DetectionReport(dr)) => {
+            assert_eq!(dr.object_id.as_deref(), Some("after-reconnect"));
+        }
+        other => panic!("expected DetectionReport, got {other:?}"),
+    }
+
+    // Verify inbound works on the new connection.
+    connection::send(
+        &mut framed2,
+        SapientMessage {
+            node_id: Some("sensor-reconnect".into()),
+            content: Some(Content::DetectionReport(DetectionReport {
+                object_id: Some("det-reconnect".into()),
+                location_oneof: Some(LocationOneof::Location(Location {
+                    x: Some(5.0),
+                    y: Some(6.0),
+                    coordinate_system: Some(1),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("send inbound after reconnect");
+
+    let mut found = false;
+    for _ in 0..50 {
+        let docs = node.query("tracks", &Query::All).await.expect("query");
+        if docs
+            .iter()
+            .any(|d| d.fields.get("lat").and_then(|v| v.as_f64()) == Some(6.0))
+        {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(found, "inbound detection should land after reconnect");
+
+    transport.stop().await.expect("stop");
+}
+
+/// Calling `disconnect()` on a DLMM peer aborts the recv task, which closes
+/// the TCP connection and exits the reconnect loop (no automatic reconnect).
+#[tokio::test]
+async fn disconnect_closes_dlmm_connection() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let remote_addr = listener.local_addr().expect("local_addr");
+
+    let backend: Arc<dyn DataSyncBackend> = Arc::new(InMemoryBackend::new_initialized());
+    let node = Arc::new(Node::new(backend));
+    let translator = Arc::new(SapientTranslator::new());
+
+    let transport = PeatSapientTransport::new(
+        SapientRole::Dlmm {
+            remote_addr,
+            peer_node_id: NodeId::from("hldmm-dc"),
+        },
+        node.clone(),
+        translator,
+    );
+    let mut events = transport.subscribe_peer_events();
+    transport.start().await.expect("start");
+
+    let (mut framed, _) = connection::accept(&listener).await.expect("accept");
+
+    // Wait for Connected.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Connected { .. })) => {}
+        other => panic!("expected Connected, got {other:?}"),
+    }
+
+    // Disconnect the peer from our side.
+    transport
+        .disconnect(&NodeId::from("hldmm-dc"))
+        .await
+        .expect("disconnect");
+
+    // Should receive Disconnected with LocalClosed reason.
+    match tokio::time::timeout(Duration::from_secs(2), events.recv()).await {
+        Ok(Some(PeerEvent::Disconnected { .. })) => {}
+        other => panic!("expected Disconnected, got {other:?}"),
+    }
+
+    // The TCP connection should be closed — the fake HLDMM's recv returns None.
+    let closed = tokio::time::timeout(Duration::from_secs(2), connection::recv(&mut framed)).await;
+    match closed {
+        Ok(Ok(None)) => {} // peer closed — expected
+        Ok(Err(_)) => {}   // I/O error on closed connection — also fine
+        other => panic!("expected closed connection, got {other:?}"),
+    }
+
+    // Peer should be gone (disconnect removed it), and the transport should
+    // NOT reconnect (verify no second accept within 2s).
+    assert_eq!(transport.peer_count(), 0);
+    let no_reconnect =
+        tokio::time::timeout(Duration::from_secs(2), connection::accept(&listener)).await;
+    assert!(
+        no_reconnect.is_err(),
+        "transport should not reconnect after disconnect()"
     );
 }
 
