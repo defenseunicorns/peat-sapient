@@ -245,10 +245,13 @@ jobs:
              - ADR conformance: the design lives in ADR-070 (SAPIENT integration, two-layer
                architecture, P0–P4 phases) and the broader ADRs in the sibling \`peat\` repo's
                \`docs/adr/\`. Flag deviations from documented responsibilities.
-          5. Re-verify every [BLOCKER] / [WARNING] / [IDIOM] / [ARCH] from the prior review:
-             - Addressed by the new commits → "Resolved: <finding>"
-             - Still unaddressed → restate it
-             - Made worse or newly broken by the delta → escalate
+          5. Re-verify every finding from the prior review:
+             - Addressed by the new commits → write "Resolved:" followed by the finding
+               description. Do NOT include the severity tag ([BLOCKER], [WARNING], [ARCH],
+               [IDIOM]) on resolved lines — the fail-closed safety net greps for those tags
+               and would incorrectly downgrade the verdict.
+             - Still unaddressed → restate it WITH the original severity tag
+             - Made worse or newly broken by the delta → escalate with severity tag
           6. Write findings using the Write tool:
              (a) Use the Write tool to save the complete review body to
                  $RUNNER_TEMP/peat-qa-review.md.
