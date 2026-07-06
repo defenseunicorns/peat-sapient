@@ -68,6 +68,57 @@ jobs:
           key: features-${{ matrix.label }}
       - run: cargo check -p peat-sapient ${{ matrix.features }}
 
+  compliance:
+    name: BSI Flex 335 v2.0 Compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: peat-sapient
+      - uses: actions/checkout@v4
+        with:
+          repository: dstl/BSI-Flex-335-v2-Test-Harness
+          ref: 6a2999d70d761d224914ddd8fa3f663af5005be0
+          path: test-harness
+      - name: Install compliance runner into test harness tree
+        run: cp -r peat-sapient/compliance/SapientComplianceRunner test-harness/SapientComplianceRunner
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: peat-sapient
+      - name: Build compliance runner
+        run: dotnet build test-harness/SapientComplianceRunner/SapientComplianceRunner.csproj -c Release
+      - name: Build compliance client
+        working-directory: peat-sapient
+        run: cargo build -p peat-sapient --bin sapient-compliance-client --no-default-features --features compliance-bin --release
+      - name: Run compliance test
+        run: |
+          dotnet run --project test-harness/SapientComplianceRunner/SapientComplianceRunner.csproj \
+            -c Release --no-build -- \
+            --mode hldmm --port 15066 --timeout 30 \
+            --output "$GITHUB_WORKSPACE/compliance-results.json" &
+          HLDMM_PID=$!
+          timeout 15 bash -c 'until nc -z 127.0.0.1 15066 2>/dev/null; do sleep 0.2; done'
+          peat-sapient/target/release/sapient-compliance-client 127.0.0.1:15066
+          CLIENT_EXIT=$?
+          wait $HLDMM_PID 2>/dev/null
+          HLDMM_EXIT=$?
+          echo "--- Compliance Results ---"
+          cat "$GITHUB_WORKSPACE/compliance-results.json"
+          if [ $CLIENT_EXIT -ne 0 ] || [ $HLDMM_EXIT -ne 0 ]; then
+            echo "::error::Compliance test failed (client=$CLIENT_EXIT, validator=$HLDMM_EXIT)"
+            exit 1
+          fi
+      - name: Upload compliance results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-results
+          path: compliance-results.json
+
   audit:
     name: Security Audit
     continue-on-error: true

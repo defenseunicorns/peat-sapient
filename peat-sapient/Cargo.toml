@@ -27,6 +27,8 @@ translator-codec = ["peat"]
 tls = ["dep:tokio-rustls", "dep:rustls-pemfile"]
 # Integration tests against the Apex SAPIENT middleware (requires apex.py on PATH).
 integration-tests = []
+# Compliance client binary deps — not needed by the library.
+compliance-bin = ["dep:ulid", "dep:tracing-subscriber"]
 
 [dependencies]
 prost = "0.13"
@@ -47,6 +49,9 @@ ulid = { version = "1", optional = true }
 
 futures-util = { version = "0.3", features = ["sink"] }
 
+# Compliance binary subscriber — not pulled by the library.
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
 # TLS support (optional, behind "tls" feature)
 tokio-rustls = { version = "0.26", optional = true }
 rustls-pemfile = { version = "2.2", optional = true }
@@ -61,6 +66,11 @@ rcgen = "0.14"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "sapient-compliance-client"
+path = "src/bin/sapient_compliance_client.rs"
+required-features = ["compliance-bin"]
 
 [[bench]]
 name = "event_driven"
