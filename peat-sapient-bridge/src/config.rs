@@ -93,6 +93,10 @@ pub struct Cli {
     /// Mesh-side node ID for the TAK Server peer.
     #[arg(long, default_value = "tak-server-0")]
     pub tak_peer_id: String,
+
+    /// Maximum inbound CoT message size in bytes (default: 65536).
+    #[arg(long)]
+    pub tak_max_message_bytes: Option<usize>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -165,6 +169,10 @@ pub struct TakConfig {
     pub tls_server_name: Option<String>,
     /// Mesh-side node ID for the TAK Server peer.
     pub peer_node_id: Option<String>,
+    /// Maximum inbound CoT message size in bytes (default: 65536).
+    /// Messages exceeding this limit are rejected before XML parsing,
+    /// mitigating quick-xml DoS vectors (RUSTSEC-2026-0194/0195).
+    pub max_message_bytes: Option<usize>,
 }
 
 impl Config {
@@ -239,6 +247,9 @@ impl Config {
             .tak
             .peer_node_id
             .get_or_insert(cli.tak_peer_id.clone());
+        if let Some(max) = cli.tak_max_message_bytes {
+            config.tak.max_message_bytes = Some(max);
+        }
 
         Ok(config)
     }

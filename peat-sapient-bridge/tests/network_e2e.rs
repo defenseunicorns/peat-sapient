@@ -149,6 +149,7 @@ async fn inbound_cot_from_tak_server_reaches_sapient_sink() {
         peer_node_id: NodeId::from("mock-tak-server"),
         use_tls: false,
         identity: None,
+        max_message_bytes: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
@@ -254,6 +255,7 @@ async fn outbound_sapient_doc_reaches_tak_server_as_cot_xml() {
         peer_node_id: NodeId::from("mock-tak-server"),
         use_tls: false,
         identity: None,
+        max_message_bytes: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
@@ -344,6 +346,7 @@ async fn bidirectional_over_single_connection() {
         peer_node_id: NodeId::from("mock-tak"),
         use_tls: false,
         identity: None,
+        max_message_bytes: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());

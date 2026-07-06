@@ -6,8 +6,11 @@
 # Known advisory: the TAK CoT XML path uses quick-xml < 0.41.0, which is
 # vulnerable to quadratic attribute-name dedup (RUSTSEC-2026-0194) and
 # unbounded namespace allocation (RUSTSEC-2026-0195). Both are DoS vectors
-# on untrusted XML input. Mitigated once peat-protocol upgrades peat-schema
-# to quick-xml >= 0.41.0. Tracked in https://github.com/defenseunicorns/peat/issues/1012
+# on untrusted XML input. Runtime mitigation: peat-tak enforces a configurable
+# max_message_bytes cap (default 64 KB) at the TCP ingress boundary, rejecting
+# oversized XML before it reaches the parser. Full fix lands once peat-protocol
+# upgrades peat-schema to quick-xml >= 0.41.0.
+# Tracked in https://github.com/defenseunicorns/peat/issues/1012
 
 [node]
 # Friendly name — also used as the iroh identity seed (same name = same NodeId).
@@ -36,3 +39,16 @@ listen = "0.0.0.0:12000"
 # DLMM mode: remote HLDMM address and peer identity.
 # remote = "10.0.1.5:12000"
 # peer_node_id = "external-hldmm"
+
+# [tak]
+# TAK Server connection (optional — omit to run without TAK).
+# server = "10.0.0.10:8089"
+# tls = true
+# client_cert = "/etc/peat/tak-client.pem"
+# client_key = "/etc/peat/tak-client-key.pem"
+# ca_cert = "/etc/peat/tak-ca.pem"
+# callsign = "Peat-BRIDGE"
+# Max inbound CoT XML message size (bytes). Rejects oversized
+# messages before XML parsing to mitigate RUSTSEC-2026-0194/0195.
+# Default: 65536 (64 KB).
+# max_message_bytes = 65536

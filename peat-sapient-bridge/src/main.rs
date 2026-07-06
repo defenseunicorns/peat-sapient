@@ -193,6 +193,7 @@ async fn main() -> Result<()> {
             peer_node_id: NodeId::from(tak_peer_id),
             use_tls,
             identity,
+            max_message_bytes: config.tak.max_message_bytes,
         };
         let t = PeatTakTransport::new(tak_config, node.clone(), tak_translator.clone());
         let tak_sink = t.outbound_sink();

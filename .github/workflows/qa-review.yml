@@ -223,11 +223,18 @@ jobs:
              - No consumer-specific references: use generic terms ("consumer", "sensor", "DLMM",
                "HLDMM") — not vendor or app names — in code, comments, and tests (per
                \`peat/CLAUDE.md\`). Flag any consumer-specific identifier.
-             - Architectural reach: cross-repo direct imports beyond \`peat-schema\` (e.g.
+             - Architectural reach: in the library crates (\`peat-sapient\` and
+               \`peat-mesh-sapient\`), cross-repo direct imports beyond \`peat-schema\` (e.g.
                \`peat-node\`, \`peat-mesh\`, \`peat-gateway\`) are [BLOCKER] — the only Peat
-               coupling is \`peat-schema\` via the \`peat\` feature. Changes to the two-layer
-               boundary or the SAPIENT integration design sit in ADR-070 territory → [ARCH];
-               escalate, do NOT propose a fix.
+               coupling is \`peat-schema\` via the \`peat\` feature.
+               \`peat-sapient-bridge\` is an application binary that intentionally composes
+               cross-repo dependencies (\`peat-mesh\`, \`peat-tak\`) per ADR-059; its
+               dependency scope is not subject to the library-crate constraint. Each
+               transport manages its own TLS and identity independently — there is no
+               cross-transport identity composition.
+               Changes to the two-layer boundary or the SAPIENT integration design in the
+               library crates sit in ADR-070 territory → [ARCH]; escalate, do NOT propose
+               a fix.
              - Implementation idiom: flag code that fights the language rather than working with it
                (Rust ignoring the borrow checker via excessive clone/unwrap, or unwrap-on-Result
                chains where \`?\` would be idiomatic). Tag [IDIOM]. NOT formatter/style nitpicking
@@ -323,11 +330,18 @@ jobs:
              - No consumer-specific references: use generic terms ("consumer", "sensor", "DLMM",
                "HLDMM") — not vendor or app names — in code, comments, and tests (per
                \`peat/CLAUDE.md\`). Flag any consumer-specific identifier.
-             - Architectural reach: cross-repo direct imports beyond \`peat-schema\` (e.g.
+             - Architectural reach: in the library crates (\`peat-sapient\` and
+               \`peat-mesh-sapient\`), cross-repo direct imports beyond \`peat-schema\` (e.g.
                \`peat-node\`, \`peat-mesh\`, \`peat-gateway\`) are [BLOCKER] — the only Peat
-               coupling is \`peat-schema\` via the \`peat\` feature. Changes to the two-layer
-               boundary or the SAPIENT integration design sit in ADR-070 territory → [ARCH];
-               escalate, do NOT propose a fix.
+               coupling is \`peat-schema\` via the \`peat\` feature.
+               \`peat-sapient-bridge\` is an application binary that intentionally composes
+               cross-repo dependencies (\`peat-mesh\`, \`peat-tak\`) per ADR-059; its
+               dependency scope is not subject to the library-crate constraint. Each
+               transport manages its own TLS and identity independently — there is no
+               cross-transport identity composition.
+               Changes to the two-layer boundary or the SAPIENT integration design in the
+               library crates sit in ADR-070 territory → [ARCH]; escalate, do NOT propose
+               a fix.
              - Implementation idiom: flag code that fights the language rather than working with it
                (Rust ignoring the borrow checker via excessive clone/unwrap, or unwrap-on-Result
                chains where \`?\` would be idiomatic). Tag [IDIOM]. NOT formatter/style nitpicking
