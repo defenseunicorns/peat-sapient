@@ -225,18 +225,20 @@ peat-sapient/                    (workspace root)
         └── transport.rs         # impl MeshTransport/Transport for PeatSapientTransport
 ```
 
-### Scope (v1)
+### Scope (v1 — inbound only)
 
 | SAPIENT message | Mesh collection | Direction |
 |---|---|---|
-| `DetectionReport` | `tracks` | SAPIENT → mesh only |
-| `Registration` / `StatusReport` | `platforms` | SAPIENT → mesh only |
+| `DetectionReport` | `tracks` | SAPIENT → mesh |
+| `Registration` / `StatusReport` | `platforms` | SAPIENT → mesh |
 | `Task` / `TaskAck` | *(none — stays on `SapientBridge`/`TaskQueue`)* | out of scope |
 
-`SapientTranslator::encode_outbound` always declines: SAPIENT has no wire
-message for "manager pushes a track/status to a sensor." Tasking is
-ack-correlated and ordered — it stays on `peat-sapient`'s existing stateful
-bridge path rather than being flattened into the eventually-consistent
+In the initial Phase 6 scope, `SapientTranslator::encode_outbound` always
+declined — there is no BSI Flex 335 v2.0 message for "manager pushes a
+track to a sensor." Bidirectional `tracks` support was added in Phase 7.
+
+Tasking is ack-correlated and ordered — it stays on `peat-sapient`'s existing
+stateful bridge path rather than being flattened into the eventually-consistent
 `Document`/CRDT model. See `docs/c2-collaboration.md`'s still-open
 `CommandAcknowledgment`/`CommandCoordinator` gap for where real tasking
 interop would go.
@@ -257,6 +259,95 @@ in the `peat` repo.
 
 ---
 
+## Phase 7 — Bidirectional bridging + bridge binary ✅
+
+**Goal:** CoT/TAK-originated tracks reach a SAPIENT HLDMM as `DetectionReport`s
+via the mesh, completing the bidirectional data flow. Shipped as the
+`peat-sapient-bridge` binary that composes both `SapientTranslator` and
+`CotTranslator` under a single `TransportManager`.
+
+### Scope
+
+| SAPIENT message | Mesh collection | Direction |
+|---|---|---|
+| `DetectionReport` | `tracks` | **Bidirectional** (encode_outbound in DLMM mode) |
+| `Registration` / `StatusReport` | `platforms` | SAPIENT → mesh (no outbound BSI message) |
+
+`SapientTranslator::encode_outbound` now encodes `tracks` documents as
+`DetectionReport` protobuf. This makes sense when the peat node acts as a
+**virtual DLMM** — forwarding mesh-originated tracks (e.g. from CoT/TAK)
+upstream to a SAPIENT HLDMM. Required fields: `doc.id`, `lat`, `lon`.
+Optional: `hae`, `sapient_classification`, `sapient_confidence`.
+
+### Components
+
+- **`SapientOutboundSink`** — `OutboundSink` impl; DLMM mode forwards to the
+  HLDMM connection via an internal channel, HLDMM mode discards silently.
+- **`PeatSapientTransport::outbound_sink()`** — returns the appropriate sink
+  for `TransportManager::register_translator` registration.
+- **`run_dlmm_peer_loop`** — bidirectional `tokio::select!` loop handling
+  both inbound `recv` and outbound channel drain on the same TCP connection.
+- **`peat-sapient-bridge` binary** — third workspace member; composes SAPIENT
+  + TAK transports, wires both into `TransportManager` fan-out on `tracks`,
+  supports CLI + TOML config, TLS for both protocols.
+- **`timestamp_ms` normalization** — standardized on `i64` across both
+  translators (PR #38).
+
+### Cross-protocol contract tests
+
+`peat-mesh-sapient/tests/cross_protocol_contract.rs` — 5 tests validating
+the shared `tracks` schema contract WITHOUT importing `peat-transport`.
+Constructs CoT-shaped mesh documents and verifies `SapientTranslator` handles
+them correctly, including full round-trip position preservation.
+
+### Tests
+
+- `peat-mesh-sapient/src/translator.rs` — 8 `encode_outbound` unit tests
+- `peat-mesh-sapient/tests/dlmm_integration.rs` — outbound sink e2e, bidirectional e2e
+- `peat-mesh-sapient/tests/fanout_e2e.rs` — TransportManager fan-out with echo-loop prevention
+- `peat-sapient-bridge/tests/bidirectional_fanout.rs` — SAPIENT↔TAK cross-translator round-trip
+- `peat-sapient-bridge/tests/network_e2e.rs` — real TAK wire protocol integration
+
+**Gate:** `cargo test --workspace` — 243 tests passing across all three crates.
+
+---
+
+## Phase 8 — DLMM reconnect resilience ✅
+
+**Goal:** When the HLDMM drops the TCP connection, the DLMM transport reconnects
+automatically with exponential backoff. The outbound channel survives across
+reconnections — messages queued during the outage are flushed on the new
+connection.
+
+### Problem
+
+`run_dlmm_connect_loop` established a single connection; when it dropped, the
+peer loop consumed `outbound_rx` and exited. The outbound channel was dead
+forever — `SapientOutboundSink::send_outbound` returned `Err` and no further
+mesh-originated tracks could reach the HLDMM.
+
+### Fix
+
+- `run_dlmm_peer_loop` now returns `mpsc::Receiver<Vec<u8>>` so the outbound
+  channel survives reconnections.
+- `run_dlmm_connect_loop` (and TLS variant) is now an outer reconnect loop:
+  connect → run peer loop → deregister peer → reconnect. Exits only when the
+  peer record is deliberately removed (via `disconnect()` or `stop()`).
+- New `deregister_peer` helper emits `PeerEvent::Disconnected` between
+  connection attempts.
+- Messages buffered in the channel during the outage are flushed to the new
+  connection on reconnect (bounded at `OUTBOUND_CHANNEL_DEPTH = 64`).
+
+### Tests
+
+- `dlmm_integration.rs::dlmm_reconnects_after_hldmm_drops_connection` —
+  drops the HLDMM connection, verifies automatic reconnect, confirms both
+  inbound and outbound resume on the new connection.
+
+**Gate:** `cargo test --workspace` — 249 tests passing.
+
+---
+
 ## Phase summary
 
 | Phase | Scope | Peat dep? | CI? | Status |
@@ -265,5 +356,7 @@ in the `peat` repo.
 | 2 | TCP codec + connection | No | Yes | ✅ Done |
 | 3 | Message mapping | Yes (`peat` feature) | Yes | ✅ Done |
 | 4 | Bridge API + integration tests | Yes | Yes | ✅ Done |
-| 5 | Formal compliance | — | Manual | ⏳ Pending Phase 4 |
-| 6 | SAPIENT ↔ CoT via peat-mesh Translator (v1: tracks/platforms) | Yes (`peat-mesh-sapient`) | Yes | ✅ Done |
+| 5 | Formal compliance | — | Manual | ⏳ Pending |
+| 6 | SAPIENT ↔ CoT via peat-mesh Translator (v1: tracks/platforms inbound) | Yes (`peat-mesh-sapient`) | Yes | ✅ Done |
+| 7 | Bidirectional bridging + bridge binary | Yes (3-crate workspace) | Yes | ✅ Done |
+| 8 | DLMM reconnect resilience | Yes (`peat-mesh-sapient`) | Yes | ✅ Done |
