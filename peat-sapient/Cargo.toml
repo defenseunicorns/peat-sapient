@@ -17,7 +17,7 @@ doctest = false
 [features]
 default = ["peat"]
 # Layer 2: peat-schema transformer. Disable with default-features = false for standalone SAPIENT lib.
-peat = ["dep:peat-schema", "dep:ulid"]
+peat = ["dep:peat-schema"]
 # Flat-JSON projection helpers (src/mesh_fields.rs) for peat-mesh-sapient's Translator
 # impl. Depends on "peat" for peat_schema types; adds no peat-mesh dependency of its
 # own — see ADR-059 Amendment 4 (peat repo): wire codec stays in the transport crate,
@@ -43,9 +43,10 @@ tracing = "0.1"
 # Layer 2 deps — only when feature "peat" is enabled.
 peat-schema = { version = "0.9.0-rc.24", optional = true }
 # ULID generation for SAPIENT task_id fields (mandatory in BSI Flex 335 v2.0).
-ulid = { version = "1", optional = true }
+ulid = "1"
 
 futures-util = { version = "0.3", features = ["sink"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # TLS support (optional, behind "tls" feature)
 tokio-rustls = { version = "0.26", optional = true }
@@ -61,6 +62,11 @@ rcgen = "0.14"
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "sapient-compliance-client"
+path = "src/bin/sapient_compliance_client.rs"
+required-features = []
 
 [[bench]]
 name = "event_driven"
