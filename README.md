@@ -276,6 +276,55 @@ cargo test -p peat-mesh-sapient
 See [docs/developer-guide.md](docs/developer-guide.md) for how to install Apex and run
 the full integration suite.
 
+### Live TAK Server integration (manual)
+
+The bridge binary (`peat-sapient-bridge`) has been validated against TAK Server
+5.7 hardened (Docker). Both data directions work end-to-end:
+
+**Outbound (SAPIENT → mesh → TAK):** A SAPIENT sensor connects to the bridge
+HLDMM port, sends a `Registration` (written to the `platforms` collection) and
+a `DetectionReport` (written to `tracks`). The `TransportManager` fan-out picks
+up the new track, `CotTranslator` encodes it as CoT XML, and the TAK transport
+sends it to the TAK server over mTLS.
+
+**Inbound (TAK → mesh → SAPIENT):** A CoT event sent by another TAK client is
+relayed by the TAK server to the bridge. The `peat-tak` reader auto-detects
+the framing (raw XML `0x3C` vs TAK protocol frame `0xBF`) per message, parses
+the event, and writes it to the `tracks` collection. Mixed framing on the same
+connection is supported — the TAK server sends protocol negotiation as raw XML
+and may send position reports as either raw XML or protobuf-framed.
+
+To reproduce:
+
+```sh
+# 1. Start TAK Server 5.7 hardened Docker containers
+#    (see takserver-docker-hardened-5.7-RELEASE-43/)
+docker compose up -d
+
+# 2. Extract client certs from the CA setup container
+#    (user.pem, user-decrypted.key, ca.pem)
+
+# 3. Run the bridge
+cargo run -p peat-sapient-bridge --features tls -- \
+  --tak-server 127.0.0.1:8089 \
+  --tak-tls \
+  --tak-cert certs/user.pem \
+  --tak-key certs/user-decrypted.key \
+  --tak-ca-cert certs/ca.pem \
+  --tak-server-name takserver \
+  --tak-callsign Peat-BRIDGE \
+  --sapient-listen 0.0.0.0:12000
+
+# 4. Send a CoT event from a second TLS client to test inbound
+echo '<event version="2.0" uid="test-001" type="a-f-G-U-C" ...>' | \
+  openssl s_client -connect 127.0.0.1:8089 \
+    -cert certs/user.pem -key certs/user-decrypted.key \
+    -CAfile certs/ca.pem -quiet
+
+# 5. Send a SAPIENT DetectionReport to port 12000 to test outbound
+#    (any SAPIENT DLMM client or the test harness)
+```
+
 ---
 
 ## Documentation
