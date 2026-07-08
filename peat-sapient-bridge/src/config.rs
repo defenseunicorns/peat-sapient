@@ -97,6 +97,10 @@ pub struct Cli {
     /// Maximum inbound CoT message size in bytes (default: 65536).
     #[arg(long)]
     pub tak_max_message_bytes: Option<usize>,
+
+    /// TAK protocol version: raw-xml, xml-tcp, or protobuf-v1 (default).
+    #[arg(long)]
+    pub tak_protocol: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -173,6 +177,8 @@ pub struct TakConfig {
     /// Messages exceeding this limit are rejected before XML parsing,
     /// mitigating quick-xml DoS vectors (RUSTSEC-2026-0194/0195).
     pub max_message_bytes: Option<usize>,
+    /// TAK protocol version: "raw-xml", "xml-tcp", or "protobuf-v1".
+    pub protocol: Option<String>,
 }
 
 impl Config {
@@ -249,6 +255,9 @@ impl Config {
             .get_or_insert(cli.tak_peer_id.clone());
         if let Some(max) = cli.tak_max_message_bytes {
             config.tak.max_message_bytes = Some(max);
+        }
+        if let Some(ref proto) = cli.tak_protocol {
+            config.tak.protocol = Some(proto.clone());
         }
 
         Ok(config)

@@ -1,3 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["peat-sapient", "peat-mesh-sapient", "peat-sapient-bridge"]
+
+[patch.crates-io]
+peat-protocol = { path = "../peat/peat-protocol" }
+peat-schema = { path = "../peat/peat-schema" }
+peat-tak = { path = "../peat-tak" }

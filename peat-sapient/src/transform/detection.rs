@@ -440,6 +440,8 @@ pub fn from_detection_report(
         confidence,
         position: Some(position),
         velocity,
+        kinematics: None,
+        position_error: None,
         state: TrackState::Confirmed as i32,
         source: Some(TrackSource {
             node_id: node_id.to_string(),
