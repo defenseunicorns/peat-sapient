@@ -176,6 +176,7 @@ impl Translator for SapientTranslator {
 
             Some(Content::StatusReport(sr)) => {
                 let (state, capability_delta) = status::from_status_report(&node_id, &sr);
+                #[allow(deprecated)]
                 if let Some(pos) = &state.position {
                     self.cache_position(
                         &node_id,

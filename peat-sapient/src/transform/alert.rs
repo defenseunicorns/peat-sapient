@@ -65,7 +65,7 @@ fn priority_label(v: i32) -> String {
 /// error — the position is silently set to `None` so the caller always gets a usable event.
 pub fn from_alert(node_id: &str, msg: &Alert) -> SapientAlertEvent {
     let position = msg.location_oneof.as_ref().and_then(|lo| match lo {
-        LocationOneof::Location(loc) => location_to_track_position(loc).ok(),
+        LocationOneof::Location(loc) => location_to_track_position(loc).ok().map(|(pos, _)| pos),
         LocationOneof::RangeBearing(_) => None,
     });
 

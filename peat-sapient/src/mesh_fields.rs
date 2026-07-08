@@ -160,6 +160,7 @@ pub fn platform_to_fields(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use peat_schema::{
