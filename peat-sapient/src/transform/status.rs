@@ -77,6 +77,8 @@ pub fn from_status_report(
         cell_id: None,
         zone_id: None,
         timestamp: None,
+        kinematics: None,
+        position_error: None,
     };
 
     // Emit a capability delta whenever FOV or mode is present.

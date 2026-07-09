@@ -8,7 +8,7 @@
 //! - raw 3 (deprecated SAPIENT v7: degrees/feet) — altitude converted to metres
 //! - raw 4 (deprecated SAPIENT v7: radians/feet) — angles to degrees, altitude to metres
 //! - `UtmM` (5) — UTM metres; inverse Transverse Mercator projection to WGS84
-//! - `x_error`/`y_error` → `cep_m` for all variants (1-σ errors in coordinate units)
+//! - `x_error`/`y_error` → `position_error.circular_error` for all variants (1-σ errors in coordinate units)
 //!
 //! **RangeBearing** (`RangeBearingCoordinateSystem`):
 //! - `DegreesM` (1) — azimuth/elevation in degrees, range in metres; passthrough
@@ -22,6 +22,7 @@
 //! Note: MGRS is not a `LocationCoordinateSystem` variant in BSI Flex 335 v2.0.
 //! ADR-070 anticipated it, but the vendored proto defines only the variants above.
 
+use peat_schema::common::v1::PositionError;
 use peat_schema::track::v1::{SourceType, Track, TrackPosition, TrackSource, TrackState, Velocity};
 
 use crate::{
@@ -215,7 +216,10 @@ fn parse_utm_zone(zone: &str) -> Option<(u8, bool)> {
 
 // ── Location conversion ───────────────────────────────────────────────────────
 
-pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition, SapientError> {
+#[allow(deprecated)]
+pub(crate) fn location_to_track_position(
+    loc: &Location,
+) -> Result<(TrackPosition, PositionError), SapientError> {
     let x = loc.x.ok_or_else(|| SapientError::MappingError {
         kind: "location",
         detail: "Location.x missing".into(),
@@ -236,24 +240,42 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
     // may still emit them; handle before the enum conversion.
     if raw_cs == 3 {
         let (sx, sy) = location_errors_to_m(x_err, y_err, y, raw_cs);
-        return Ok(TrackPosition {
-            latitude: y,
-            longitude: x,
-            altitude: (z * FEET_TO_METRES) as f32,
-            cep_m: cep_from_errors_m(sx, sy),
-            vertical_error_m: (z_err * FEET_TO_METRES) as f32,
-        });
+        let cep = cep_from_errors_m(sx, sy);
+        let vert = (z_err * FEET_TO_METRES) as f32;
+        return Ok((
+            TrackPosition {
+                latitude: y,
+                longitude: x,
+                altitude: (z * FEET_TO_METRES) as f32,
+                cep_m: cep,
+                vertical_error_m: vert,
+            },
+            PositionError {
+                circular_error: cep,
+                linear_error: 0.0,
+                vertical_error: vert,
+            },
+        ));
     }
     if raw_cs == 4 {
         let lat_deg = y.to_degrees();
         let (sx, sy) = location_errors_to_m(x_err, y_err, lat_deg, raw_cs);
-        return Ok(TrackPosition {
-            latitude: lat_deg,
-            longitude: x.to_degrees(),
-            altitude: (z * FEET_TO_METRES) as f32,
-            cep_m: cep_from_errors_m(sx, sy),
-            vertical_error_m: (z_err * FEET_TO_METRES) as f32,
-        });
+        let cep = cep_from_errors_m(sx, sy);
+        let vert = (z_err * FEET_TO_METRES) as f32;
+        return Ok((
+            TrackPosition {
+                latitude: lat_deg,
+                longitude: x.to_degrees(),
+                altitude: (z * FEET_TO_METRES) as f32,
+                cep_m: cep,
+                vertical_error_m: vert,
+            },
+            PositionError {
+                circular_error: cep,
+                linear_error: 0.0,
+                vertical_error: vert,
+            },
+        ));
     }
 
     let cs =
@@ -262,24 +284,42 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
     match cs {
         LocationCoordinateSystem::LatLngDegM => {
             let (sx, sy) = location_errors_to_m(x_err, y_err, y, raw_cs);
-            Ok(TrackPosition {
-                latitude: y,
-                longitude: x,
-                altitude: z as f32,
-                cep_m: cep_from_errors_m(sx, sy),
-                vertical_error_m: z_err as f32,
-            })
+            let cep = cep_from_errors_m(sx, sy);
+            let vert = z_err as f32;
+            Ok((
+                TrackPosition {
+                    latitude: y,
+                    longitude: x,
+                    altitude: z as f32,
+                    cep_m: cep,
+                    vertical_error_m: vert,
+                },
+                PositionError {
+                    circular_error: cep,
+                    linear_error: 0.0,
+                    vertical_error: vert,
+                },
+            ))
         }
         LocationCoordinateSystem::LatLngRadM => {
             let lat_deg = y.to_degrees();
             let (sx, sy) = location_errors_to_m(x_err, y_err, lat_deg, raw_cs);
-            Ok(TrackPosition {
-                latitude: lat_deg,
-                longitude: x.to_degrees(),
-                altitude: z as f32,
-                cep_m: cep_from_errors_m(sx, sy),
-                vertical_error_m: z_err as f32,
-            })
+            let cep = cep_from_errors_m(sx, sy);
+            let vert = z_err as f32;
+            Ok((
+                TrackPosition {
+                    latitude: lat_deg,
+                    longitude: x.to_degrees(),
+                    altitude: z as f32,
+                    cep_m: cep,
+                    vertical_error_m: vert,
+                },
+                PositionError {
+                    circular_error: cep,
+                    linear_error: 0.0,
+                    vertical_error: vert,
+                },
+            ))
         }
         LocationCoordinateSystem::UtmM => {
             let zone_str = loc
@@ -296,13 +336,22 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
                 })?;
             let (lat, lon) = utm_to_latlon(x, y, zone_num, northern);
             let (sx, sy) = location_errors_to_m(x_err, y_err, lat, raw_cs);
-            Ok(TrackPosition {
-                latitude: lat,
-                longitude: lon,
-                altitude: z as f32,
-                cep_m: cep_from_errors_m(sx, sy),
-                vertical_error_m: z_err as f32,
-            })
+            let cep = cep_from_errors_m(sx, sy);
+            let vert = z_err as f32;
+            Ok((
+                TrackPosition {
+                    latitude: lat,
+                    longitude: lon,
+                    altitude: z as f32,
+                    cep_m: cep,
+                    vertical_error_m: vert,
+                },
+                PositionError {
+                    circular_error: cep,
+                    linear_error: 0.0,
+                    vertical_error: vert,
+                },
+            ))
         }
         LocationCoordinateSystem::Unspecified => Err(SapientError::UnsupportedCoordinateSystem(
             "unspecified coordinate system".into(),
@@ -310,10 +359,11 @@ pub(crate) fn location_to_track_position(loc: &Location) -> Result<TrackPosition
     }
 }
 
+#[allow(deprecated)]
 fn range_bearing_to_track_position(
     rb: &RangeBearing,
     sensor: &TrackPosition,
-) -> Result<TrackPosition, SapientError> {
+) -> Result<(TrackPosition, PositionError), SapientError> {
     let (range, azimuth_deg, elevation_deg, range_err) = normalize_rb(rb)?;
 
     // Convert spherical (range, azimuth, elevation) to Cartesian offset, then
@@ -330,13 +380,21 @@ fn range_bearing_to_track_position(
     let lat_deg_per_m = 1.0 / 111_111.0;
     let lon_deg_per_m = 1.0 / (111_111.0 * sensor.latitude.to_radians().cos());
 
-    Ok(TrackPosition {
-        latitude: sensor.latitude + north_m * lat_deg_per_m,
-        longitude: sensor.longitude + east_m * lon_deg_per_m,
-        altitude: sensor.altitude + up_m as f32,
-        cep_m: range_err as f32,
-        vertical_error_m: 0.0,
-    })
+    let cep = range_err as f32;
+    Ok((
+        TrackPosition {
+            latitude: sensor.latitude + north_m * lat_deg_per_m,
+            longitude: sensor.longitude + east_m * lon_deg_per_m,
+            altitude: sensor.altitude + up_m as f32,
+            cep_m: cep,
+            vertical_error_m: 0.0,
+        },
+        PositionError {
+            circular_error: cep,
+            linear_error: 0.0,
+            vertical_error: 0.0,
+        },
+    ))
 }
 
 // ── Velocity conversion ───────────────────────────────────────────────────────
@@ -376,7 +434,7 @@ pub fn from_detection_report(
     sensor_position: Option<&TrackPosition>,
     msg: &DetectionReport,
 ) -> Result<Track, SapientError> {
-    let position = match &msg.location_oneof {
+    let (position, pos_error) = match &msg.location_oneof {
         Some(LocationOneof::Location(loc)) => location_to_track_position(loc)?,
         Some(LocationOneof::RangeBearing(rb)) => {
             let sensor = sensor_position.ok_or_else(|| {
@@ -434,12 +492,15 @@ pub fn from_detection_report(
         );
     }
 
+    #[allow(deprecated)]
     Ok(Track {
         track_id: msg.object_id.clone().unwrap_or_default(),
         classification,
         confidence,
         position: Some(position),
         velocity,
+        kinematics: None,
+        position_error: Some(pos_error),
         state: TrackState::Confirmed as i32,
         source: Some(TrackSource {
             node_id: node_id.to_string(),
@@ -455,6 +516,7 @@ pub fn from_detection_report(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::proto::sapient_msg::bsi_flex_335_v2_0::{
@@ -867,26 +929,28 @@ mod tests {
             })),
             ..Default::default()
         };
-        let pos = from_detection_report("n", None, &report)
-            .unwrap()
-            .position
-            .unwrap();
+        let track = from_detection_report("n", None, &report).unwrap();
+        let pos = track.position.unwrap();
         assert!(
             pos.cep_m > 100.0 && pos.cep_m < 200.0,
             "cep_m={}",
             pos.cep_m
         );
         assert_eq!(pos.vertical_error_m, 0.0);
+        let pe = track.position_error.unwrap();
+        assert_eq!(pe.circular_error, pos.cep_m);
+        assert_eq!(pe.vertical_error, pos.vertical_error_m);
     }
 
     #[test]
     fn location_errors_zero_when_not_provided() {
-        let pos = from_detection_report("n", None, &simple_detection(51.0, 0.0))
-            .unwrap()
-            .position
-            .unwrap();
+        let track = from_detection_report("n", None, &simple_detection(51.0, 0.0)).unwrap();
+        let pos = track.position.unwrap();
         assert_eq!(pos.cep_m, 0.0);
         assert_eq!(pos.vertical_error_m, 0.0);
+        let pe = track.position_error.unwrap();
+        assert_eq!(pe.circular_error, 0.0);
+        assert_eq!(pe.vertical_error, 0.0);
     }
 
     #[test]
@@ -908,15 +972,16 @@ mod tests {
             })),
             ..Default::default()
         };
-        let pos = from_detection_report("n", None, &report)
-            .unwrap()
-            .position
-            .unwrap();
+        let track = from_detection_report("n", None, &report).unwrap();
+        let pos = track.position.unwrap();
         assert!(
             (pos.cep_m - 58.87).abs() < 1.0,
             "expected ~58.87 m CEP, got {}",
             pos.cep_m
         );
+        let pe = track.position_error.unwrap();
+        assert_eq!(pe.circular_error, pos.cep_m);
+        assert_eq!(pe.vertical_error, pos.vertical_error_m);
     }
 
     // ── Classification ───────────────────────────────────────────────────────

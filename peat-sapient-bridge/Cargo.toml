@@ -19,7 +19,7 @@ tls = ["peat-sapient/tls", "peat-mesh-sapient/tls"]
 peat-mesh = { version = "0.9.0-rc.41", features = ["automerge-backend"] }
 peat-mesh-sapient = { path = "../peat-mesh-sapient" }
 peat-sapient = { path = "../peat-sapient" }
-peat-tak = { version = "0.0.2", features = ["mesh-translator"] }
+peat-tak = { version = "0.0.3", features = ["mesh-translator"] }
 
 anyhow = "1"
 base64 = "0.22"

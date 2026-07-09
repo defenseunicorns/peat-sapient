@@ -25,6 +25,7 @@ use std::collections::HashMap;
 
 // ── Fixture builders ────────────────────────────────────────────────────────
 
+#[allow(deprecated)]
 fn sample_track() -> Track {
     Track {
         track_id: "trk-bench-001".into(),
@@ -38,6 +39,8 @@ fn sample_track() -> Track {
             vertical_error_m: 2.0,
         }),
         velocity: None,
+        kinematics: None,
+        position_error: None,
         state: TrackState::Confirmed as i32,
         source: Some(TrackSource {
             node_id: "sensor-42".into(),
@@ -95,6 +98,8 @@ fn sample_node_state() -> NodeState {
         cell_id: None,
         zone_id: None,
         timestamp: None,
+        kinematics: None,
+        position_error: None,
     }
 }
 

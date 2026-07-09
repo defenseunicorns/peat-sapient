@@ -188,12 +188,19 @@ async fn main() -> Result<()> {
         } else {
             None
         };
+        let protocol_version = match config.tak.protocol.as_deref() {
+            Some("raw-xml") => Some(peat_tak::TakProtocolVersion::RawXml),
+            Some("xml-tcp") => Some(peat_tak::TakProtocolVersion::XmlTcp),
+            Some("protobuf-v1") | None => None,
+            Some(other) => anyhow::bail!("unknown --tak-protocol: {other}"),
+        };
         let tak_config = TakMeshConfig {
             server_addr,
             peer_node_id: NodeId::from(tak_peer_id),
             use_tls,
             identity,
             max_message_bytes: config.tak.max_message_bytes,
+            protocol_version,
         };
         let t = PeatTakTransport::new(tak_config, node.clone(), tak_translator.clone());
         let tak_sink = t.outbound_sink();

@@ -160,6 +160,7 @@ pub fn platform_to_fields(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use peat_schema::{
@@ -182,6 +183,8 @@ mod tests {
                 vertical_error_m: 2.0,
             }),
             velocity: None,
+            kinematics: None,
+            position_error: None,
             state: 0,
             source: Some(TrackSource {
                 node_id: "sensor-42".into(),
@@ -251,6 +254,8 @@ mod tests {
             cell_id: None,
             zone_id: None,
             timestamp: None,
+            kinematics: None,
+            position_error: None,
         };
 
         let (id, fields) = platform_to_fields(&advertisement, Some(&state));

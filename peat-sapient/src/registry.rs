@@ -86,6 +86,7 @@ pub async fn remove(registry: &NodeRegistry, node_id: &str) {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use peat_schema::capability::v1::{CapabilityAdvertisement, OperationalStatus};

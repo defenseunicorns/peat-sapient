@@ -150,6 +150,7 @@ async fn inbound_cot_from_tak_server_reaches_sapient_sink() {
         use_tls: false,
         identity: None,
         max_message_bytes: None,
+        protocol_version: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
@@ -256,6 +257,7 @@ async fn outbound_sapient_doc_reaches_tak_server_as_cot_xml() {
         use_tls: false,
         identity: None,
         max_message_bytes: None,
+        protocol_version: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
@@ -347,6 +349,7 @@ async fn bidirectional_over_single_connection() {
         use_tls: false,
         identity: None,
         max_message_bytes: None,
+        protocol_version: None,
     };
 
     let tak_transport = PeatTakTransport::new(tak_config, node.clone(), cot_translator.clone());
