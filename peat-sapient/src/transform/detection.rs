@@ -250,7 +250,11 @@ pub(crate) fn location_to_track_position(
                 cep_m: cep,
                 vertical_error_m: vert,
             },
-            PositionError { circular_error: cep, linear_error: 0.0, vertical_error: vert },
+            PositionError {
+                circular_error: cep,
+                linear_error: 0.0,
+                vertical_error: vert,
+            },
         ));
     }
     if raw_cs == 4 {
@@ -266,7 +270,11 @@ pub(crate) fn location_to_track_position(
                 cep_m: cep,
                 vertical_error_m: vert,
             },
-            PositionError { circular_error: cep, linear_error: 0.0, vertical_error: vert },
+            PositionError {
+                circular_error: cep,
+                linear_error: 0.0,
+                vertical_error: vert,
+            },
         ));
     }
 
@@ -286,7 +294,11 @@ pub(crate) fn location_to_track_position(
                     cep_m: cep,
                     vertical_error_m: vert,
                 },
-                PositionError { circular_error: cep, linear_error: 0.0, vertical_error: vert },
+                PositionError {
+                    circular_error: cep,
+                    linear_error: 0.0,
+                    vertical_error: vert,
+                },
             ))
         }
         LocationCoordinateSystem::LatLngRadM => {
@@ -302,7 +314,11 @@ pub(crate) fn location_to_track_position(
                     cep_m: cep,
                     vertical_error_m: vert,
                 },
-                PositionError { circular_error: cep, linear_error: 0.0, vertical_error: vert },
+                PositionError {
+                    circular_error: cep,
+                    linear_error: 0.0,
+                    vertical_error: vert,
+                },
             ))
         }
         LocationCoordinateSystem::UtmM => {
@@ -330,7 +346,11 @@ pub(crate) fn location_to_track_position(
                     cep_m: cep,
                     vertical_error_m: vert,
                 },
-                PositionError { circular_error: cep, linear_error: 0.0, vertical_error: vert },
+                PositionError {
+                    circular_error: cep,
+                    linear_error: 0.0,
+                    vertical_error: vert,
+                },
             ))
         }
         LocationCoordinateSystem::Unspecified => Err(SapientError::UnsupportedCoordinateSystem(
@@ -369,7 +389,11 @@ fn range_bearing_to_track_position(
             cep_m: cep,
             vertical_error_m: 0.0,
         },
-        PositionError { circular_error: cep, linear_error: 0.0, vertical_error: 0.0 },
+        PositionError {
+            circular_error: cep,
+            linear_error: 0.0,
+            vertical_error: 0.0,
+        },
     ))
 }
 
