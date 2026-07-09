@@ -22,7 +22,7 @@ tls = ["peat-sapient/tls"]
 # Amendment 4 — peat-sapient itself has zero peat-mesh dependency.
 peat-mesh = { version = "0.9.0-rc.41", default-features = false }
 peat-sapient = { path = "../peat-sapient", default-features = false, features = ["translator-codec"] }
-peat-schema = "0.9.0-rc.24"
+peat-schema = "0.9.0-rc.30"
 
 async-trait = "0.1"
 anyhow = "1"

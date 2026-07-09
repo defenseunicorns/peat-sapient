@@ -929,26 +929,28 @@ mod tests {
             })),
             ..Default::default()
         };
-        let pos = from_detection_report("n", None, &report)
-            .unwrap()
-            .position
-            .unwrap();
+        let track = from_detection_report("n", None, &report).unwrap();
+        let pos = track.position.unwrap();
         assert!(
             pos.cep_m > 100.0 && pos.cep_m < 200.0,
             "cep_m={}",
             pos.cep_m
         );
         assert_eq!(pos.vertical_error_m, 0.0);
+        let pe = track.position_error.unwrap();
+        assert_eq!(pe.circular_error, pos.cep_m);
+        assert_eq!(pe.vertical_error, pos.vertical_error_m);
     }
 
     #[test]
     fn location_errors_zero_when_not_provided() {
-        let pos = from_detection_report("n", None, &simple_detection(51.0, 0.0))
-            .unwrap()
-            .position
-            .unwrap();
+        let track = from_detection_report("n", None, &simple_detection(51.0, 0.0)).unwrap();
+        let pos = track.position.unwrap();
         assert_eq!(pos.cep_m, 0.0);
         assert_eq!(pos.vertical_error_m, 0.0);
+        let pe = track.position_error.unwrap();
+        assert_eq!(pe.circular_error, 0.0);
+        assert_eq!(pe.vertical_error, 0.0);
     }
 
     #[test]
@@ -970,15 +972,16 @@ mod tests {
             })),
             ..Default::default()
         };
-        let pos = from_detection_report("n", None, &report)
-            .unwrap()
-            .position
-            .unwrap();
+        let track = from_detection_report("n", None, &report).unwrap();
+        let pos = track.position.unwrap();
         assert!(
             (pos.cep_m - 58.87).abs() < 1.0,
             "expected ~58.87 m CEP, got {}",
             pos.cep_m
         );
+        let pe = track.position_error.unwrap();
+        assert_eq!(pe.circular_error, pos.cep_m);
+        assert_eq!(pe.vertical_error, pos.vertical_error_m);
     }
 
     // ── Classification ───────────────────────────────────────────────────────
